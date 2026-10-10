@@ -67,7 +67,7 @@ def draft_project(articles, outline=None, design=None):
         else:
             body, source_ids = '', []
         cards.append({'role': role, 'heading': item['heading'], 'body': body, 'source_ids': source_ids,
-                      'layout': None, 'image_id': design['image_ids'][0] if design['image_ids'] else None})
+                      'layout': None, 'image_id': design['image_ids'][0] if design['image_ids'] and design.get('layout') not in ('breaking', 'poster') else None})
     caption = primary['title'] + '\n\n'
     for source in sources:
         entry = f"출처: {source['publisher']}\n{source['url']}\n"

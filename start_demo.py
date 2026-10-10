@@ -1,4 +1,4 @@
-"""Portable demo launcher: standard library only, dependencies isolated in .venv-pc."""
+"""Portable news studio launcher: standard library only, dependencies isolated in .venv-pc."""
 import argparse
 import hashlib
 import json
@@ -45,20 +45,29 @@ def prepare_python():
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Launch the offline Medialog demo')
+    parser = argparse.ArgumentParser(description='Launch Medialog RSS news studio')
     parser.add_argument('--port', type=int, help='Local port (default: first free port from 8001 to 8010)')
     parser.add_argument('--no-browser', action='store_true', help='Do not open the browser automatically')
+    parser.add_argument('--offline-demo', action='store_true', help='Use fictional news with RSS scheduling disabled')
     args = parser.parse_args()
     if args.port is not None and not 1024 <= args.port <= 65535:
         raise RuntimeError('Choose a port from 1024 to 65535.')
     executable = prepare_python()
     env = os.environ.copy()
-    env['MEDIALOG_DB'] = str(ROOT / 'data' / 'demo.sqlite3')
-    env['MEDIALOG_SCHEDULER'] = '0'
+    env['MEDIALOG_DB'] = str(ROOT / 'data' / ('demo.sqlite3' if args.offline_demo else 'medialog.sqlite3'))
+    if not args.offline_demo and not Path(env['MEDIALOG_DB']).exists() and (ROOT / 'data' / 'demo.sqlite3').exists():
+        import sqlite3
+        Path(env['MEDIALOG_DB']).parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(ROOT / 'data' / 'demo.sqlite3') as previous, sqlite3.connect(env['MEDIALOG_DB']) as current:
+            previous.backup(current)
+        print('Previous demo work copied to the news workspace.')
+    env['MEDIALOG_SCHEDULER'] = '0' if args.offline_demo else '1'
+    env['MEDIALOG_PRESETS'] = '0' if args.offline_demo else '1'
     bundled_font = ROOT / 'fonts' / 'NotoSansCJK-Regular.ttc'
     if bundled_font.is_file():
         env['MEDIALOG_FONT'] = str(bundled_font)
-    subprocess.run([str(executable), '-m', 'app.demo'], cwd=ROOT, env=env, check=True)
+    if args.offline_demo:
+        subprocess.run([str(executable), '-m', 'app.demo'], cwd=ROOT, env=env, check=True)
     subprocess.run([str(executable), '-c', 'from app.render import font_path; print("Image font:", font_path())'], cwd=ROOT, env=env, check=True)
     port = pick_port(args.port)
     url = f'http://127.0.0.1:{port}'

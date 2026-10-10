@@ -75,6 +75,9 @@ async def schedule():
 @asynccontextmanager
 async def lifespan(app):
     db.init_db()
+    if os.getenv('MEDIALOG_PRESETS', '1') == '1':
+        from .presets import install_defaults
+        install_defaults()
     task = None
     if os.getenv('MEDIALOG_SCHEDULER', '1') == '1':
         task = asyncio.create_task(schedule())
@@ -185,6 +188,21 @@ def health():
 def feeds():
     with db.connect() as conn:
         return [dict(row) for row in conn.execute('SELECT * FROM feeds ORDER BY id')]
+
+
+@app.post('/api/feeds/presets')
+def restore_feed_presets():
+    from .presets import FEEDS
+    with db.connect() as conn:
+        for name, url in FEEDS:
+            conn.execute('INSERT OR IGNORE INTO feeds(name,url) VALUES (?,?)', (name, url))
+    return {'count': len(FEEDS)}
+
+
+@app.get('/api/settings/breaking-template')
+def default_breaking_template():
+    from .presets import breaking_template
+    return breaking_template()
 
 
 @app.post('/api/feeds', status_code=201)

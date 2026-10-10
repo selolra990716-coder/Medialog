@@ -24,6 +24,7 @@ ATOM = b'''<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>Atom story</t
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv('MEDIALOG_DB', str(tmp_path / 'test.sqlite3'))
     monkeypatch.setenv('MEDIALOG_SCHEDULER', '0')
+    monkeypatch.setenv('MEDIALOG_PRESETS', '0')
     monkeypatch.setattr(rss, 'validate_public_url', AsyncMock(side_effect=lambda url: rss.canonical_url(url)))
     with TestClient(app) as instance:
         yield instance
@@ -395,3 +396,62 @@ def test_reference_palette_applies_to_saved_defaults_and_render(client):
     assert client.post('/api/assets/invalid/style').status_code == 404
     settings['design']['background'] = 'invalid'
     assert client.put('/api/settings', json=settings).status_code == 422
+
+
+def test_publisher_defaults_are_once_only_and_preserve_user_edits(client):
+    from app.presets import install_defaults, FEEDS
+    install_defaults()
+    assert len(client.get('/api/feeds').json()) == len(FEEDS)
+    settings = client.get('/api/settings').json()
+    assert settings['design']['layout'] == 'breaking'
+    settings['design']['accent'] = '#123456'
+    client.put('/api/settings', json=settings)
+    feed = client.get('/api/feeds').json()[0]
+    client.delete(f"/api/feeds/{feed['id']}")
+    install_defaults()
+    assert len(client.get('/api/feeds').json()) == len(FEEDS) - 1
+    assert client.get('/api/settings').json()['design']['accent'] == '#123456'
+    assert client.post('/api/feeds/presets').status_code == 200
+    assert len(client.get('/api/feeds').json()) == len(FEEDS)
+    assert client.get('/api/settings/breaking-template').json()['design']['layout'] == 'breaking'
+
+
+def test_breaking_reference_design_renders_photo_and_long_body(client):
+    from app.presets import breaking_template
+    design = breaking_template().design.model_dump()
+    buffer = io.BytesIO()
+    Image.new('RGB', (500, 200), '#609030').save(buffer, format='PNG')
+    asset = client.post('/api/assets?name=background.png', content=buffer.getvalue()).json()
+    design['image_ids'] = [asset['id']]
+    project = {'accent':design['accent'], 'design':design, 'reviewed':False, 'sources':[],
+               'cards':[{'heading':'오늘의 이슈', 'role':'cover', 'body':'새로운 지역 소식\n핵심 내용을 확인하세요', 'source_ids':[], 'image_id':asset['id']},
+                        {'heading':'핵심 사실', 'role':'facts', 'body':'원문에서 확인해야 하는 핵심 내용입니다. ' * 22, 'source_ids':[], 'image_id':None}]}
+    rendered = Image.open(io.BytesIO(render_card(project, 0)))
+    assert rendered.size == (1080,1350)
+    assert rendered.getpixel((0,0)) == (36,54,18)
+    assert rendered.getpixel((500,255)) == (230,0,18)
+    assert Image.open(io.BytesIO(render_card(project,1))).size == (1080,1350)
+    assert client.post('/api/assets/'+asset['id']+'/style').status_code == 200
+
+
+def test_default_publisher_collection_creates_breaking_draft(client, monkeypatch):
+    from app.presets import install_defaults
+    install_defaults()
+    items = rss.parse_feed(RSS, 'https://news.example.com/rss')
+    async def fetch(url):
+        if 'khan.co.kr' in url:
+            raise ValueError('테스트: 해당 언론사 일시 응답 실패')
+        return items
+    monkeypatch.setattr(rss, 'fetch_feed', fetch)
+    response = client.post('/api/collect')
+    assert response.status_code == 200
+    results = response.json()['results']
+    assert len(results) == 5
+    assert len([row for row in results if row.get('error')]) == 1
+    issues = client.get('/api/issues').json()
+    assert issues
+    draft = client.post('/api/issues/open', json={'article_ids':[a['id'] for a in issues[0]['articles']]}).json()
+    assert draft['design']['layout'] == 'breaking'
+    assert len(draft['cards']) == 3
+    assert client.get(f"/api/projects/{draft['id']}/cards/0.png").status_code == 200
+    assert client.post('/api/issues/open', json={'article_ids':[a['id'] for a in issues[0]['articles']]}).json()['id'] == draft['id']

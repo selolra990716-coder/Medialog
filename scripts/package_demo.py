@@ -22,6 +22,7 @@ def main():
             else:
                 archive.write(path, name)
         archive.write(FONT,'Medialog-demo/fonts/NotoSansCJK-Regular.ttc')
+        archive.write(ROOT / 'fonts' / 'NotoSansCJKkr-Bold.otf','Medialog-demo/fonts/NotoSansCJKkr-Bold.otf')
         archive.write(LICENSE,'Medialog-demo/fonts/LICENSE-Noto-CJK.txt')
     print(f'Packaged: {output} ({output.stat().st_size / 1024 / 1024:.1f} MB)')
 

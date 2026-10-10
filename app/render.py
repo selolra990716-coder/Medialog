@@ -58,12 +58,88 @@ def fit(text, draw, width, height, max_size, min_size):
     raise ValueError('카드 문구가 이미지 영역보다 깁니다. 문구를 줄여 주세요.')
 
 
+
+def bold_font(size):
+    path = Path(__file__).resolve().parent.parent / 'fonts' / 'NotoSansCJKkr-Bold.otf'
+    return ImageFont.truetype(str(path), size) if path.is_file() else font(size)
+
+
+def render_breaking(project, index):
+    card = project['cards'][index]
+    design = project.get('design', {})
+    background = design.get('background') or '#191b1d'
+    ink = design.get('text_color') or '#ffffff'
+    accent = project['accent']
+    image = Image.new('RGB', (1080, 1350), background)
+    if card.get('image_id'):
+        path = image_path(card['image_id'])
+        if not path.is_file():
+            raise ValueError('배경 사진 파일을 찾을 수 없습니다. 자산 보관함을 확인하세요.')
+        with Image.open(path) as source:
+            image = ImageOps.fit(source.convert('RGB'), image.size)
+        image = Image.blend(image, Image.new('RGB', image.size, '#000000'), .62)
+    draw = ImageDraw.Draw(image)
+    # Slanted red badge and large white headline follow the supplied reference.
+    draw.polygon([(398, 252), (708, 252), (685, 328), (375, 328)], fill=accent)
+    draw.polygon([(380, 252), (390, 252), (367, 328), (357, 328)], fill=accent)
+    badge = '뉴스속보' if card.get('role') == 'cover' or index == 0 else card['heading']
+    badge_face = bold_font(44)
+    if draw.textlength(badge, font=badge_face) > 270:
+        badge = f'{index + 1:02d} / 핵심 내용'
+        badge_face = bold_font(30)
+    draw.text((540, 284), badge, anchor='mm', font=badge_face, fill='#ffffff')
+    body = card['body'] or '원문을 확인하고 내용을 작성하세요.'
+    max_size = 112 if card.get('role') == 'cover' or index == 0 else 76
+    for size in range(max_size, 27, -2):
+        face = bold_font(size)
+        lines = wrap(body, draw, face, 930)
+        spacing = int(size * 1.38)
+        if len(lines) * spacing <= 670:
+            break
+    else:
+        raise ValueError('속보 카드 문구가 너무 깁니다. 문구를 줄여 주세요.')
+    y = 440 + max(0, (570 - len(lines) * spacing) / 2)
+    for line in lines:
+        draw.text((543, y + 5), line, anchor='mt', font=face, fill='#000000', stroke_width=3)
+        draw.text((540, y), line, anchor='mt', font=face, fill=ink)
+        y += spacing
+    publishers = list(dict.fromkeys(source['publisher'] for source in project['sources'] if source['article_id'] in card['source_ids']))
+    footer = '출처: ' + ', '.join(publishers) if publishers else '직접 작성 · 출처 확인 필요'
+    face, lines, spacing = fit(footer[:130], draw, 920, 80, 22, 18)
+    for number, line in enumerate(lines):
+        draw.text((540, 1110 + number * spacing), line, anchor='mt', font=face, fill=ink)
+    logo_id = design.get('logo_id')
+    if logo_id:
+        with Image.open(image_path(logo_id)) as logo:
+            thumb = ImageOps.contain(logo.convert('RGBA'), (340, 90))
+            image.paste(thumb, ((1080 - thumb.width)//2, 1190), thumb)
+    else:
+        # Colored wordmark, separate from any news photograph.
+        face = bold_font(64)
+        name = '미디어로그'
+        mask = Image.new('L', image.size)
+        ImageDraw.Draw(mask).text((540, 1190), name, anchor='mt', font=face, fill=255)
+        gradient = Image.new('RGB', image.size)
+        gradient_draw = ImageDraw.Draw(gradient)
+        for x in range(1080):
+            amount = max(0, min(1, (x - 360) / 360))
+            gradient_draw.line((x, 1190, x, 1280), fill=(int(15 + 215*amount), int(75*(1-amount)), int(235*(1-amount)+35*amount)))
+        image.paste(gradient, (0, 0), mask)
+    draw.text((980, 1300), f'{index+1:02d}', anchor='rt', font=font(20), fill=ink)
+    if not project['reviewed']:
+        draw.text((70, 1300), '검토 전 초안', font=font(20), fill=ink)
+    output = io.BytesIO()
+    image.save(output, format='PNG')
+    return output.getvalue()
+
 def render_card(project, index):
     card = project['cards'][index]
     accent = project['accent']
     if not re.fullmatch(r'#[0-9a-fA-F]{6}', accent):
         raise ValueError('강조색 형식이 잘못되었습니다.')
     layout = card.get('layout') or project.get('design', {}).get('layout', 'classic')
+    if layout == 'breaking':
+        return render_breaking(project, index)
     design = project.get('design', {})
     light = layout == 'editorial'
     ink = '#182922' if light else '#f1f4f6'

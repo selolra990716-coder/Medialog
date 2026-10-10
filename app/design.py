@@ -2,7 +2,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 from . import rss
 
-Layout = Literal['classic', 'editorial', 'image', 'poster']
+Layout = Literal['classic', 'editorial', 'image', 'poster', 'breaking']
 Role = Literal['cover', 'facts', 'background', 'impact', 'sources', 'custom']
 
 

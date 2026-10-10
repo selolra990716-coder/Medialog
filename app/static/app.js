@@ -20,7 +20,9 @@ function toast(message, error = false) {
   state.toastTimer = setTimeout(() => $('#toast').classList.add('hidden'), error ? 8000 : 4500);
 }
 async function api(path, options = {}) {
-  const response = await fetch(path, {headers: {'Content-Type': 'application/json'}, ...options});
+  let response;
+  try {response = await fetch(path, {signal: AbortSignal.timeout(path==='/api/collect'?120000:30000), headers: {'Content-Type': 'application/json'}, ...options});}
+  catch(error) {throw new Error(error.name==='TimeoutError'?'응답이 지연되고 있습니다. 잠시 후 다시 확인하세요.':'서버에 연결할 수 없습니다. 실행 창이 열려 있는지 확인하세요.');}
   if (!response.ok) {
     let data;
     try { data = await response.json(); } catch { throw new Error(`요청 실패 (HTTP ${response.status})`); }
@@ -60,6 +62,9 @@ async function loadIssues() {
   $('#issue-count').innerHTML = `${issues.length} <small>ISSUES</small>`;
   $('#feed-count').innerHTML = `${feeds.length} <small>SOURCES</small>`;
   $('#issue-total').textContent = issues.length;
+  const checked=feeds.filter(feed=>feed.last_checked);
+  const failed=checked.filter(feed=>feed.last_error);
+  $('#collection-status').textContent=checked.length?`RSS 확인 ${checked.length}/${feeds.length}개 · 실패 ${failed.length}개. ${failed.length?'RSS 관리에서 언론사별 오류를 확인하세요.':''}`:(feeds.length?'첫 RSS 수집을 진행 중입니다. 잠시 후 자동 갱신됩니다.':'RSS 관리에서 기본 언론사를 추가하세요.');
   if (!issues.length) {
     $('#issue-list').innerHTML = empty(feeds.length ? '아직 발견한 이슈가 없습니다' : '첫 번째 뉴스 소스를 연결하세요', feeds.length ? '지금 수집하기를 누르거나 검색 조건을 바꿔 보세요. 수집 실패는 RSS 관리에서 확인할 수 있습니다.' : '언론사의 공개 RSS를 등록하면 새 기사를 모아 카드뉴스 초안을 만들 수 있습니다.', '<button class="primary" id="empty-feeds">RSS 관리로 이동 →</button>');
     $('#empty-feeds').onclick = () => showView('feeds');
@@ -140,6 +145,7 @@ function showCard() {
   document.querySelectorAll('[data-source]').forEach(input => input.onchange = () => markDirty());
   refreshPreview();
 }
+$('#preview').onerror=()=>{$('#preview-state').textContent='이미지를 만들지 못했습니다. 문구 길이와 첨부 파일을 확인하고 다시 저장하세요.';};
 function refreshPreview() {
   $('#preview').src = `/api/projects/${state.project.id}/cards/${state.card}.png?v=${Date.now()}`;
 }
@@ -169,6 +175,8 @@ $('#feed-form').onsubmit = event => {
     toast('RSS를 등록했습니다. 이슈 탐색에서 지금 수집하기를 누르세요.');
   });
 };
+$('#restore-feeds').onclick=()=>busy($('#restore-feeds'),async()=>{await api('/api/feeds/presets',{method:'POST'});await loadFeeds();toast('기본 언론사 RSS를 추가했습니다. 지금 수집하기로 결과를 확인하세요.');});
+$('#breaking-default').onclick=()=>busy($('#breaking-default'),async()=>{state.settings=await api('/api/settings/breaking-template');await loadAssetNames(state.settings.design);renderDesigner('settings',state.settings.design);$('#settings-count').value=state.settings.outline.length;renderOutline('settings');toast('기본 속보 디자인을 불러왔습니다. 기본 설정 저장을 눌러 적용하세요.');});
 $('#collect').onclick = () => busy($('#collect'), async () => {
   const result = await api('/api/collect', {method:'POST'});
   if (result.busy) {toast('이미 수집 중입니다. 잠시 후 다시 확인하세요.'); return;}
@@ -193,13 +201,14 @@ $('#export').onclick = () => busy($('#export'), async () => {
   toast(`${state.project.cards.length}장 이미지와 캡션, 출처를 다운로드했습니다.`);
 });
 $('#accent').oninput = () => {state.project.design.accent = $('#accent').value; const color = $('#editor-design input[type=color]'); if (color) color.value = $('#accent').value; markDirty();};
-$('#preview').onerror = () => toast('미리보기를 만들 수 없습니다. 문구 길이와 서버 글꼴 설정을 확인하세요.', true);
+
 window.addEventListener('beforeunload', event => {if (state.dirty) {event.preventDefault(); event.returnValue = '';}});
 showView('issues');
+setInterval(()=>{if(state.view==='issues' && !$('#plan-dialog').open) loadIssues().catch(()=>{});},10000);
 
 
 const roleLabels = {cover:'표지',facts:'핵심 사실',background:'배경',impact:'영향 · 전망',sources:'출처',custom:'직접 작성'};
-const layouts = {classic:'텍스트 중심',editorial:'에디토리얼',image:'이미지 + 텍스트',poster:'중앙 포스터'};
+const layouts = {classic:'텍스트 중심',editorial:'에디토리얼',image:'이미지 + 텍스트',poster:'중앙 포스터',breaking:'미디어로그 속보'};
 async function openPlan(issue) {
   const defaults = await api('/api/settings');
   state.plan = {...defaults, article_ids:issue.articles.slice(0,20).map(article => article.id)};

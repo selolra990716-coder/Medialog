@@ -33,7 +33,7 @@ Linux 한글 글꼴은 Noto Sans CJK 또는 Nanum Gothic을 사용합니다. 둘
 - URL 정규화와 추적 파라미터 제거를 통한 중복 방지
 - 제목 키워드 유사도 기반 이슈 묶기와 최근성·언론사 수 기반 점수
 - RSS 요약 문장을 그대로 발췌하는 초안 제작: **AI 요약이나 새로운 사실 생성은 하지 않습니다.**
-- 텍스트 중심·밝은 에디토리얼·이미지+텍스트·중앙 포스터의 네 가지 레이아웃, 장별 레이아웃 재지정
+- 텍스트 중심·밝은 에디토리얼·이미지+텍스트·중앙 포스터·미디어로그 속보의 다섯 가지 레이아웃, 장별 레이아웃 재지정
 - 장별 역할·제목·순서를 지정하는 초기 구성 설정
 - 참고 링크·메모와 PNG/JPEG/WebP 첨부, 썸네일 확인과 카드 이미지 선택
 - Pillow 기반 한글 이미지 렌더링, 장별 출처 표기, 검토 상태, ZIP 출력
@@ -97,7 +97,7 @@ MEDIALOG_DB=data/demo.sqlite3 MEDIALOG_SCHEDULER=0 .venv/bin/python -m uvicorn a
 
 ## PC 데모 배포
 
-Windows에서는 `start-windows.bat`, macOS에서는 `start-macos.command`를 사용하세요. 또는 Python 3.12를 설치한 뒤 `python start_demo.py`로 실행하세요. 시작기는 `.venv-pc`에 의존성을 설치하고 별도 데모 DB를 준비한 다음 준비 상태를 확인하고 브라우저를 엽니다. 자세한 설치·종료 방법은 [PC-DEMO.md](PC-DEMO.md)를 참고하세요. 배포 ZIP에는 한글 글꼴과 해당 라이선스도 포함됩니다.
+Windows에서는 `start-windows.bat`, macOS에서는 `start-macos.command`를 사용하세요. 또는 Python 3.12를 설치한 뒤 `python start_demo.py`로 실행하세요. 시작기는 `.venv-pc`에 의존성을 설치하고 실제 RSS 작업 공간을 준비한 다음 준비 상태를 확인하고 브라우저를 엽니다. 오프라인 데모는 `python start_demo.py --offline-demo`로 실행합니다. 자세한 설치·종료 방법은 [PC-DEMO.md](PC-DEMO.md)를 참고하세요. 배포 ZIP에는 한글 글꼴과 해당 라이선스도 포함됩니다.
 
 ## 환경설정과 자산 보관함
 
@@ -112,3 +112,9 @@ Windows에서는 `start-windows.bat`, macOS에서는 `start-macos.command`를 �
 이미지 첨부 결과와 초안 생성 오류는 구성 설정 창 내부에 표시합니다. 빈 참고 링크 행은 무시하지만 설명만 입력한 행에는 URL이 필요합니다. `example.com/reference`처럼 프로토콜이 없는 참고 링크에는 HTTPS를 붙입니다. 업로드 중에는 초안 생성 버튼을 잠시 비활성화합니다.
 
 업데이트할 때는 실행 중인 터미널에서 Ctrl+C로 종료하고 최신 코드를 받으세요. 기존 `data/` 폴더를 보관하거나 새 폴더로 옮기면 피드·작업물·환경설정·자산을 유지할 수 있습니다. `.venv-pc/`는 새 폴더로 옮기지 않아도 시작기가 다시 준비합니다.
+
+## 기본 언론사와 속보 레퍼런스
+
+PC 시작기는 기본적으로 실제 RSS 수집을 켭니다. 최초 등록 목록은 연합뉴스 (`https://www.yna.co.kr/rss/news.xml`), 한겨레 (`https://www.hani.co.kr/rss/`), 경향신문 (`https://www.khan.co.kr/rss/rssdata/total_news.xml`), 동아일보 (`https://www.donga.com/news/rss`), 전자신문 (`https://rss.etnews.com/Section901.xml`)입니다. 공개 주소의 가용성은 수집 시 확인하며 언론사 응답, 제공 중단, 접근 제한은 RSS 관리에 표시합니다. 이 개발 환경에서는 언론사 도메인이 프록시로 차단되어 실시간 응답을 검증하지 못했습니다.
+
+기본 디자인은 굵은 흰색 중앙 제목·빨간 속보 배지·어두운 배경·미디어로그 워드마크를 사용하는 `breaking` 템플릿입니다. 공식 Noto CJK Bold 글꼴을 포함합니다. 기존 환경설정은 보존하며 환경설정의 **기본 속보 디자인 불러오기**로 전환합니다. 실제 뉴스 배경 사진은 카드별로 직접 선택합니다. 기본 언론사 등록은 한 번만 실행하며 사용자가 삭제한 피드는 재실행해도 되살리지 않습니다. **기본 언론사 RSS 추가**로 복원할 수 있습니다.
