@@ -1,0 +1,342 @@
+import asyncio
+import io
+import json
+import logging
+import os
+import zipfile
+from contextlib import asynccontextmanager, suppress
+from pathlib import Path
+
+import httpx
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, Response
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field, model_validator
+
+from . import db, rss, assets
+from .design import Design, Outline, Layout, Role, default_outline
+from .issues import draft_project, group_issues
+from .render import render_card
+
+log = logging.getLogger('medialog')
+collection_lock = asyncio.Lock()
+
+
+async def collect_all():
+    if collection_lock.locked():
+        return {'busy': True, 'results': []}
+    async with collection_lock:
+        with db.connect() as conn:
+            feeds = [dict(row) for row in conn.execute('SELECT * FROM feeds ORDER BY id')]
+        semaphore = asyncio.Semaphore(4)
+
+        async def collect(feed):
+            async with semaphore:
+                try:
+                    items = await rss.fetch_feed(feed['url'])
+                    added = 0
+                    with db.connect() as conn:
+                        for item in items:
+                            cursor = conn.execute('''INSERT OR IGNORE INTO articles
+                                (feed_id,publisher,title,url,summary,published_at,collected_at) VALUES (?,?,?,?,?,?,?)''',
+                                (feed['id'], feed['name'], item['title'], item['url'], item['summary'], item['published_at'], rss.utcnow()))
+                            added += cursor.rowcount
+                        conn.execute('UPDATE feeds SET last_checked=?,last_error=NULL WHERE id=?', (rss.utcnow(), feed['id']))
+                    return {'feed_id': feed['id'], 'name': feed['name'], 'added': added, 'error': None}
+                except Exception as exc:
+                    # Do not persist proxy/network exception strings that may include credential-bearing URLs.
+                    if isinstance(exc, httpx.HTTPStatusError):
+                        error = f'RSS 서버 HTTP {exc.response.status_code}: 주소와 접근 권한을 확인하세요.'
+                    elif isinstance(exc, httpx.ProxyError):
+                        error = 'RSS 네트워크 접근 실패: 환경 설정에서 이 RSS 호스트의 접근을 허용하세요.'
+                    elif isinstance(exc, httpx.TimeoutException):
+                        error = 'RSS 서버 응답 시간 초과'
+                    elif isinstance(exc, ValueError):
+                        error = 'RSS 주소 또는 문서가 올바르지 않습니다.'
+                    else:
+                        error = 'RSS 수집 실패: 네트워크 접근 또는 XML 형식을 확인하세요.'
+                    log.warning('Feed %s failed (%s)', feed['id'], type(exc).__name__)
+                    with db.connect() as conn:
+                        conn.execute('UPDATE feeds SET last_checked=?,last_error=? WHERE id=?', (rss.utcnow(), error, feed['id']))
+                    return {'feed_id': feed['id'], 'name': feed['name'], 'added': 0, 'error': error}
+        return {'busy': False, 'results': await asyncio.gather(*(collect(feed) for feed in feeds))}
+
+
+async def schedule():
+    interval = max(60, int(os.getenv('MEDIALOG_POLL_SECONDS', '900')))
+    while True:
+        try:
+            await collect_all()
+        except Exception:
+            log.exception('Scheduled collection failed')
+        await asyncio.sleep(interval)
+
+
+@asynccontextmanager
+async def lifespan(app):
+    db.init_db()
+    task = None
+    if os.getenv('MEDIALOG_SCHEDULER', '1') == '1':
+        task = asyncio.create_task(schedule())
+    yield
+    if task:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+app = FastAPI(title='Medialog', lifespan=lifespan)
+static = Path(__file__).parent / 'static'
+app.mount('/static', StaticFiles(directory=static), name='static')
+
+
+class FeedInput(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    url: str = Field(min_length=10, max_length=2000)
+
+    @model_validator(mode='after')
+    def nonblank_name(self):
+        self.name = self.name.strip()
+        if not self.name:
+            raise ValueError('언론사 이름을 입력하세요.')
+        return self
+
+
+class DraftInput(BaseModel):
+    article_ids: list[int] = Field(min_length=1, max_length=20)
+    outline: list[Outline] = Field(default_factory=default_outline, min_length=3, max_length=10)
+    design: Design = Field(default_factory=Design)
+
+
+class Source(BaseModel):
+    article_id: int
+    publisher: str = Field(min_length=1, max_length=80)
+    title: str = Field(min_length=1, max_length=500)
+    url: str = Field(max_length=2000)
+
+    @model_validator(mode='after')
+    def valid_url(self):
+        self.url = rss.canonical_url(self.url)
+        return self
+
+
+class Card(BaseModel):
+    heading: str = Field(min_length=1, max_length=100)
+    body: str = Field(max_length=500)
+    source_ids: list[int] = Field(max_length=20)
+    role: Role = 'facts'
+    layout: Layout | None = None
+    image_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')
+
+
+class Project(BaseModel):
+    title: str = Field(min_length=1, max_length=500)
+    cards: list[Card] = Field(min_length=3, max_length=10)
+    design: Design = Field(default_factory=Design)
+    sources: list[Source] = Field(min_length=1, max_length=20)
+    accent: str = Field(pattern=r'^#[0-9a-fA-F]{6}$')
+    caption: str = Field(max_length=10000)
+    reviewed: bool = False
+    generation_mode: str = 'extractive'
+    warning: str = Field(default='', max_length=1000)
+
+    @model_validator(mode='after')
+    def valid_review(self):
+        self.design.accent = self.accent
+        valid = {source.article_id for source in self.sources}
+        for card in self.cards:
+            if card.image_id and card.image_id not in self.design.image_ids:
+                raise ValueError('카드 이미지를 먼저 참고 이미지에 첨부하세요.')
+            if not set(card.source_ids) <= valid:
+                raise ValueError('카드의 출처가 프로젝트에 없습니다.')
+        if self.reviewed and any(not card.body.strip() or not card.source_ids for card in self.cards):
+            raise ValueError('모든 카드에 문구와 출처를 입력해야 검토를 완료할 수 있습니다.')
+        return self
+
+
+def read_project(project_id):
+    with db.connect() as conn:
+        row = conn.execute('SELECT * FROM projects WHERE id=?', (project_id,)).fetchone()
+    if row is None:
+        raise HTTPException(404, '프로젝트를 찾을 수 없습니다.')
+    payload = json.loads(row['payload'])
+    if 'design' not in payload:
+        payload['design'] = Design(accent=payload['accent']).model_dump()
+    for index, card in enumerate(payload['cards']):
+        card.setdefault('role', 'cover' if index == 0 else 'sources' if index == len(payload['cards']) - 1 else 'facts')
+        card.setdefault('layout', None)
+        card.setdefault('image_id', None)
+    return {'id': row['id'], **payload, 'updated_at': row['updated_at']}
+
+
+@app.get('/')
+def index():
+    return FileResponse(static / 'index.html')
+
+
+@app.get('/api/health')
+def health():
+    with db.connect() as conn:
+        conn.execute('SELECT 1').fetchone()
+    return {'status': 'ok', 'scheduler': os.getenv('MEDIALOG_SCHEDULER', '1') == '1'}
+
+
+@app.get('/api/feeds')
+def feeds():
+    with db.connect() as conn:
+        return [dict(row) for row in conn.execute('SELECT * FROM feeds ORDER BY id')]
+
+
+@app.post('/api/feeds', status_code=201)
+async def add_feed(payload: FeedInput):
+    try:
+        url = await rss.validate_public_url(payload.url)
+    except (ValueError, OSError):
+        raise HTTPException(400, '공개 HTTP(S) RSS 주소를 입력하세요. 내부 주소와 인증 포함 주소는 허용하지 않습니다.')
+    with db.connect() as conn:
+        if conn.execute('SELECT id FROM feeds WHERE url=?', (url,)).fetchone():
+            raise HTTPException(409, '이미 등록한 RSS 주소입니다.')
+        cursor = conn.execute('INSERT INTO feeds(name,url) VALUES (?,?)', (payload.name.strip(), url))
+        return {'id': cursor.lastrowid, 'name': payload.name.strip(), 'url': url}
+
+
+@app.delete('/api/feeds/{feed_id}', status_code=204)
+def delete_feed(feed_id: int):
+    with db.connect() as conn:
+        if conn.execute('DELETE FROM feeds WHERE id=?', (feed_id,)).rowcount == 0:
+            raise HTTPException(404, 'RSS를 찾을 수 없습니다.')
+
+
+@app.post('/api/collect')
+async def collect():
+    return await collect_all()
+
+
+@app.get('/api/issues')
+def issues(q: str = '', days: int = 7):
+    if days < 1 or days > 365:
+        raise HTTPException(400, '조회 기간은 1~365일입니다.')
+    from datetime import datetime, timedelta, timezone
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    with db.connect() as conn:
+        articles = [dict(row) for row in conn.execute('SELECT * FROM articles WHERE published_at>=? ORDER BY published_at DESC LIMIT 1000', (cutoff,))]
+    if q:
+        articles = [a for a in articles if q.lower() in (a['title'] + ' ' + a['summary'] + ' ' + a['publisher']).lower()]
+    return group_issues(articles)
+
+
+@app.post('/api/projects', status_code=201)
+def create_project(payload: DraftInput):
+    ids = list(dict.fromkeys(payload.article_ids))
+    with db.connect() as conn:
+        rows = conn.execute(f"SELECT * FROM articles WHERE id IN ({','.join('?' for _ in ids)})", ids).fetchall()
+        lookup = {row['id']: dict(row) for row in rows}
+        if len(lookup) != len(ids):
+            raise HTTPException(404, '선택한 기사를 찾을 수 없습니다.')
+        check_assets(payload.design)
+        draft = draft_project([lookup[i] for i in ids], [row.model_dump() for row in payload.outline], payload.design.model_dump())
+        # Source/publisher list may be long. Keep the source card editable without overflowing the image.
+        draft['cards'][-1]['body'] = draft['cards'][-1]['body'][:450]
+        validated = Project(**draft).model_dump()
+        now = rss.utcnow()
+        cursor = conn.execute('INSERT INTO projects(title,payload,created_at,updated_at) VALUES (?,?,?,?)',
+                              (validated['title'], json.dumps(validated, ensure_ascii=False), now, now))
+        project_id = cursor.lastrowid
+    return read_project(project_id)
+
+
+@app.get('/api/projects')
+def projects():
+    with db.connect() as conn:
+        rows = conn.execute('SELECT id,title,payload,updated_at FROM projects ORDER BY id DESC').fetchall()
+    return [{'id': r['id'], 'title': r['title'], 'updated_at': r['updated_at'], 'reviewed': json.loads(r['payload'])['reviewed'], 'card_count': len(json.loads(r['payload'])['cards'])} for r in rows]
+
+
+@app.get('/api/projects/{project_id}')
+def project(project_id: int):
+    return read_project(project_id)
+
+
+@app.put('/api/projects/{project_id}')
+def save_project(project_id: int, payload: Project):
+    read_project(project_id)
+    check_assets(payload.design)
+    with db.connect() as conn:
+        conn.execute('UPDATE projects SET title=?,payload=?,updated_at=? WHERE id=?',
+                     (payload.title, payload.model_dump_json(), rss.utcnow(), project_id))
+    return read_project(project_id)
+
+
+@app.delete('/api/projects/{project_id}', status_code=204)
+def delete_project(project_id: int):
+    with db.connect() as conn:
+        if conn.execute('DELETE FROM projects WHERE id=?', (project_id,)).rowcount == 0:
+            raise HTTPException(404, '프로젝트를 찾을 수 없습니다.')
+
+
+@app.get('/api/projects/{project_id}/cards/{index}.png')
+def card_png(project_id: int, index: int):
+    project = read_project(project_id)
+    if index < 0 or index >= len(project['cards']):
+        raise HTTPException(404, '카드를 찾을 수 없습니다.')
+    try:
+        content = render_card(project, index)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    return Response(content, media_type='image/png', headers={'Cache-Control': 'no-store'})
+
+
+@app.get('/api/projects/{project_id}/export.zip')
+def export(project_id: int):
+    project = read_project(project_id)
+    if not project['reviewed']:
+        raise HTTPException(409, '문구와 출처를 검토하고 검토 완료를 저장해 주세요.')
+    buffer = io.BytesIO()
+    try:
+        with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as archive:
+            for index in range(len(project['cards'])):
+                archive.writestr(f'card-{index + 1:02d}.png', render_card(project, index))
+            archive.writestr('caption.txt', project['caption'])
+            archive.writestr('sources.json', json.dumps(project['sources'], ensure_ascii=False, indent=2))
+            archive.writestr('design.json', json.dumps(project.get('design', {}), ensure_ascii=False, indent=2))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    return Response(buffer.getvalue(), media_type='application/zip', headers={'Content-Disposition': f'attachment; filename="medialog-{project_id}.zip"'})
+
+
+def check_assets(design):
+    for asset_id in design.image_ids:
+        try:
+            assets.metadata(asset_id)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+
+
+@app.post('/api/assets', status_code=201)
+async def upload_asset(request: Request, name: str = 'reference.png'):
+    data = bytearray()
+    async for chunk in request.stream():
+        data.extend(chunk)
+        if len(data) > assets.MAX_UPLOAD_BYTES:
+            raise HTTPException(413, '이미지는 8MB 이하로 첨부하세요.')
+    try:
+        return await asyncio.to_thread(assets.store, bytes(data), name)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+
+
+@app.get('/api/assets/{asset_id}/info')
+def asset_info(asset_id: str):
+    try:
+        return assets.metadata(asset_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+
+
+@app.get('/api/assets/{asset_id}.png')
+def asset_image(asset_id: str):
+    try:
+        assets.metadata(asset_id)
+        return FileResponse(assets.image_path(asset_id), media_type='image/png')
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))

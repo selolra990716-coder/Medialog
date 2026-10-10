@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Medialog — 뉴스에서 이야기로</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<aside class="sidebar">
+  <a class="brand" href="/">m<span>edialog</span><i></i></a>
+  <div class="workspace">EDITORIAL WORKSPACE</div>
+  <nav aria-label="메인 메뉴">
+    <button class="nav active" data-view="issues"><span>◈</span> 이슈 탐색</button>
+    <button class="nav" data-view="projects"><span>▦</span> 제작 보관함</button>
+    <button class="nav" data-view="feeds"><span>◉</span> RSS 관리</button>
+  </nav>
+  <div class="side-bottom"><span class="dot"></span> RSS 기반 뉴스 스튜디오<p>뉴스를 읽고, 맥락을 담고,<br>당신의 이야기로 전달하세요.</p></div>
+</aside>
+<main>
+  <header><div><span class="eyebrow">MEDIALOG STUDIO</span><span class="header-line">/</span><span id="breadcrumb">이슈 탐색</span></div><span class="local-badge">LOCAL WORKSPACE <span class="dot"></span></span></header>
+  <section id="issues-view" class="view">
+    <div class="page-heading"><div><p class="eyebrow">DISCOVER & CREATE</p><h1>오늘의 뉴스,<br><span>다음 이야기의 시작.</span></h1><p class="subtitle">흩어진 보도를 하나의 이슈로. 카드뉴스에 담을 이야기를 찾아보세요.</p></div><button id="collect" class="primary">↻ 지금 수집하기</button></div>
+    <div class="stats"><div><span>수집된 기사</span><strong id="article-count">0 <small>ARTICLES</small></strong></div><div><span>발견한 이슈</span><strong id="issue-count">0 <small>ISSUES</small></strong></div><div><span>등록된 RSS</span><strong id="feed-count">0 <small>SOURCES</small></strong></div><div class="stat-note"><span class="dot"></span><p>15분마다 자동 수집<br><small>원문 출처와 함께 제작하세요</small></p></div></div>
+    <div class="section-bar"><h2>이슈 피드 <span id="issue-total">0</span></h2><div class="filters"><input id="search" aria-label="기사 검색" placeholder="제목, 언론사, 키워드 검색"><select id="days" aria-label="조회 기간"><option value="7">최근 7일</option><option value="1">최근 24시간</option><option value="30">최근 30일</option></select></div></div>
+    <div id="issue-list" class="issue-grid"></div>
+  </section>
+  <section id="feeds-view" class="view hidden">
+    <p class="eyebrow">YOUR NEWS SOURCES</p><h1>RSS 관리</h1><p class="subtitle">언론사가 공개한 RSS 주소를 등록하세요. 각 피드의 수집 결과를 확인할 수 있습니다.</p>
+    <form id="feed-form" class="feed-form"><label>언론사 이름<input name="name" required maxlength="80" placeholder="예: 연합뉴스"></label><label class="grow">RSS 주소<input name="url" type="url" required placeholder="https://www.yna.co.kr/rss/news.xml"></label><button class="primary" type="submit">RSS 등록 +</button></form>
+    <p class="muted">공개 RSS·Atom을 지원합니다. 본문이나 기사 이미지는 별도로 수집하지 않습니다.</p>
+    <div id="feed-list"></div>
+  </section>
+  <section id="projects-view" class="view hidden"><p class="eyebrow">YOUR EDITORIAL ARCHIVE</p><h1>제작 보관함</h1><p class="subtitle">작성 중인 초안과 검토를 마친 카드뉴스를 이어서 편집하세요.</p><div id="project-list" class="issue-grid"></div></section>
+  <section id="editor-view" class="view hidden">
+    <div class="editor-top"><button id="back" class="text-button">← 보관함</button><div><button id="save" class="secondary">변경 저장</button><button id="export" class="primary">ZIP 다운로드 ↓</button></div></div>
+    <p class="eyebrow">CARD NEWS EDITOR</p><h1 class="editor-title">이야기를 다듬는 시간.</h1><p class="subtitle"><span id="editor-count">6</span>장의 카드 · 1080 × 1350 px · 원문과 사실을 확인한 뒤 내보내세요.</p>
+    <div id="draft-warning" class="notice"></div>
+    <label class="project-title-label">프로젝트 제목<input id="project-title" maxlength="500"></label>
+    <details class="design-details"><summary>레이아웃 · 참고 자료 설정</summary><div id="editor-design"></div></details>
+    <div class="editor-layout"><div><div id="card-tabs" class="card-tabs"></div><div class="card-preview"><img id="preview" alt="저장된 카드뉴스 미리보기"></div><p id="preview-state" class="muted">미리보기는 저장된 문구를 표시합니다.</p></div>
+    <div class="editor-panel"><div class="panel-heading"><h2 id="card-label">01 / 표지</h2><label class="color-label">강조색 <input id="accent" type="color"></label></div><div class="card-design-controls"><label>장별 레이아웃<select id="card-layout"><option value="">전체 설정 따르기</option><option value="classic">텍스트 중심</option><option value="editorial">에디토리얼</option><option value="image">이미지 + 텍스트</option></select></label><label>카드 이미지<select id="card-image"></select></label></div><label>카드 제목<input id="card-heading" maxlength="100"></label><label>카드 문구<textarea id="card-body" rows="8" maxlength="500" placeholder="원문에서 확인한 내용을 작성하세요."></textarea></label><label>이 카드의 출처<div id="card-sources" class="source-checks"></div></label><div id="source-links" class="source-links"></div><label>인스타그램 캡션<textarea id="caption" rows="5" maxlength="10000"></textarea></label><label class="review-label"><input type="checkbox" id="reviewed"> 모든 카드의 문구와 출처를 검토했습니다.</label><p class="muted">수정하면 검토 상태가 해제됩니다. 빈 문구와 출처를 채운 뒤 검토 완료를 저장하세요.</p></div></div>
+  </section>
+  <footer>MEDIALOG <span>뉴스를 넘어, 맥락을 전달하는 작업 공간.</span></footer>
+</main>
+<dialog id="plan-dialog" class="plan-dialog"><form id="plan-form"><div class="dialog-heading"><div><p class="eyebrow">PLAN YOUR STORY</p><h2>카드뉴스 구성 설정</h2></div><button type="button" id="close-plan" class="text-button" aria-label="설정 닫기">✕</button></div><p id="plan-issue" class="subtitle"></p><div id="plan-design"></div><div class="outline-heading"><h3>장별 구성</h3><label>장수 <select id="plan-count" aria-label="카드 장수"></select></label></div><div id="plan-outline"></div><p class="muted">장별 역할과 제목을 지정하고 화살표로 순서를 바꿀 수 있습니다. RSS 문장만 발췌하므로 배경·영향 내용의 적합성은 직접 검토하세요.</p><div class="dialog-actions"><button type="submit" class="primary">이 구성으로 초안 만들기 →</button></div></form></dialog>
+<div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+</body>
+</html>
