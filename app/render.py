@@ -64,11 +64,16 @@ def render_card(project, index):
     if not re.fullmatch(r'#[0-9a-fA-F]{6}', accent):
         raise ValueError('강조색 형식이 잘못되었습니다.')
     layout = card.get('layout') or project.get('design', {}).get('layout', 'classic')
+    design = project.get('design', {})
     light = layout == 'editorial'
     ink = '#182922' if light else '#f1f4f6'
     muted = '#617468' if light else '#a0adb9'
     rule = '#d4ddcf' if light else '#35404a'
-    image = Image.new('RGB', (1080, 1350), '#f6f4eb' if light else '#111820')
+    ink = design.get('text_color') or ink
+    background = design.get('background') or ('#f6f4eb' if light else '#111820')
+    if design.get('text_color'):
+        muted = ink
+    image = Image.new('RGB', (1080, 1350), background)
     draw = ImageDraw.Draw(image)
     logo_id = project.get('design', {}).get('logo_id')
     if logo_id:
@@ -83,7 +88,10 @@ def render_card(project, index):
         draw.text((95, 84), 'MEDIALOG', font=font(28), fill='#111820')
     draw.text((930, 84), f'{index + 1:02d}', font=font(30), fill=accent)
     draw.line((72, 186, 1008, 186), fill=rule, width=2)
-    if layout == 'image':
+    if layout == 'poster':
+        heading_y, heading_height, body_y, body_height = 250, 180, 490, 600
+        heading_size, body_size = 74, 92
+    elif layout == 'image':
         box = (72, 220, 1008, 620)
         if card.get('image_id'):
             path = image_path(card['image_id'])
@@ -101,19 +109,21 @@ def render_card(project, index):
         draw.rectangle((72, 235, 84, 435), fill=accent)
         heading_y, heading_height, body_y, body_height = 250, 210, 510, 590
         heading_size, body_size = 60, 50
-        draw.rounded_rectangle((56, 480, 1024, 1110), radius=16, fill='#e8ecdf')
+        draw.rounded_rectangle((56, 480, 1024, 1110), radius=16, fill=background if design.get('background') else '#e8ecdf')
     else:
         heading_y, heading_height, body_y, body_height = 240, 220, 490, 620
         heading_size, body_size = 64, 68 if card.get('role') == 'cover' or index == 0 else 48
     face, lines, spacing = fit(card['heading'], draw, 900 if light else 920, heading_height, heading_size, 24)
     y = heading_y
     for line in lines:
-        draw.text((100 if light else 72, y), line, font=face, fill=ink if light else accent)
+        x = (1080 - draw.textlength(line, font=face)) / 2 if layout == 'poster' else (100 if light else 72)
+        draw.text((x, y), line, font=face, fill=ink if light or layout == 'poster' else accent, stroke_width=1 if layout == 'poster' else 0)
         y += spacing
     face, lines, spacing = fit(card['body'], draw, 900, body_height, body_size, 24)
-    y = body_y
+    y = body_y + max(0, (body_height - len(lines) * spacing) / 2) if layout == 'poster' else body_y
     for line in lines:
-        draw.text((88 if light else 72, y), line, font=face, fill=ink)
+        x = (1080 - draw.textlength(line, font=face)) / 2 if layout == 'poster' else (88 if light else 72)
+        draw.text((x, y), line, font=face, fill=ink, stroke_width=2 if layout == 'poster' else 0)
         y += spacing
     publishers = list(dict.fromkeys(s['publisher'] for s in project['sources'] if s['article_id'] in card['source_ids']))
     footer = '출처: ' + ', '.join(publishers) if publishers else '직접 작성 · 출처 확인 필요'

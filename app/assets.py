@@ -49,3 +49,32 @@ def store(content, filename):
         path.unlink(missing_ok=True)
         raise
     return metadata(asset_id)
+
+
+def reference_style(asset_id):
+    """Extract the dominant background and a saturated accent, without copying text."""
+    metadata(asset_id)
+    with Image.open(image_path(asset_id)) as source:
+        rgba = source.convert('RGBA')
+        canvas = Image.new('RGBA', rgba.size, '#ffffff')
+        canvas.alpha_composite(rgba)
+        sample = canvas.convert('RGB')
+        sample.thumbnail((160, 160))
+        palette = sample.quantize(colors=12).convert('RGB')
+        colors = sorted(palette.getcolors(25600), reverse=True)
+    import colorsys
+    background = colors[0][1]
+    candidates = [(count * colorsys.rgb_to_hsv(*(v / 255 for v in rgb))[1], rgb)
+                  for count, rgb in colors
+                  if colorsys.rgb_to_hsv(*(v / 255 for v in rgb))[1] > .25
+                  and max(rgb) > 100]
+    accent = max(candidates)[1] if candidates else ((230, 230, 230) if sum(background) < 384 else (40, 40, 40))
+    def hex_color(rgb):
+        return '#' + ''.join(f'{value:02x}' for value in rgb)
+    def linear(value):
+        value /= 255
+        return value / 12.92 if value <= .04045 else ((value + .055) / 1.055) ** 2.4
+    luminance = sum(weight * linear(value) for weight, value in zip((.2126,.7152,.0722), background))
+    return {'layout': 'poster', 'background': hex_color(background),
+            'text_color': '#111820' if luminance > .179 else '#ffffff',
+            'accent': hex_color(accent)}

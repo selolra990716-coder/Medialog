@@ -362,6 +362,14 @@ async def upload_asset(request: Request, name: str = 'reference.png'):
         raise HTTPException(503, '이미지 저장 권한이 없습니다. ZIP을 모두 풀고 쓰기 가능한 일반 폴더에서 실행하세요.')
 
 
+@app.post('/api/assets/{asset_id}/style')
+def analyze_reference(asset_id: str):
+    try:
+        return assets.reference_style(asset_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+
+
 @app.get('/api/assets/{asset_id}/info')
 def asset_info(asset_id: str):
     try:

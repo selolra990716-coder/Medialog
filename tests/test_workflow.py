@@ -365,3 +365,33 @@ def test_concurrent_issue_open_creates_one_draft(client,monkeypatch):
     assert all(response.status_code==200 for response in results)
     assert results[0].json()['id']==results[1].json()['id']
     assert len(client.get('/api/projects').json())==1
+
+
+def test_reference_palette_applies_to_saved_defaults_and_render(client):
+    image = Image.new('RGB', (240, 300), '#151515')
+    from PIL import ImageDraw
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((80, 30, 160, 45), fill='#e02030')
+    draw.rectangle((30, 120, 210, 150), fill='white')
+    buffer = io.BytesIO()
+    image.save(buffer, format='JPEG')
+    asset = client.post('/api/assets?name=reference.jpg', content=buffer.getvalue()).json()
+    response = client.post(f"/api/assets/{asset['id']}/style")
+    assert response.status_code == 200
+    style = response.json()
+    assert style['layout'] == 'poster'
+    assert style['text_color'] == '#ffffff'
+    assert max(bytes.fromhex(style['background'][1:])) < 40
+    accent = bytes.fromhex(style['accent'][1:])
+    assert accent[0] > accent[1] * 2
+    settings = client.get('/api/settings').json()
+    settings['design'].update(style, image_ids=[asset['id']])
+    assert client.put('/api/settings', json=settings).status_code == 200
+    assert client.get('/api/settings').json()['design']['background'] == style['background']
+    project = {'accent':style['accent'], 'design':settings['design'], 'reviewed':False,
+               'sources':[], 'cards':[{'heading':'오늘의 이슈', 'body':'핵심 내용을 중앙에 표시합니다.', 'source_ids':[]}]}
+    rendered = Image.open(io.BytesIO(render_card(project, 0)))
+    assert rendered.getpixel((0, 0)) == tuple(bytes.fromhex(style['background'][1:]))
+    assert client.post('/api/assets/invalid/style').status_code == 404
+    settings['design']['background'] = 'invalid'
+    assert client.put('/api/settings', json=settings).status_code == 422
