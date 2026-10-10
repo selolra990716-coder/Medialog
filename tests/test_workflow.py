@@ -279,3 +279,89 @@ def test_existing_projects_are_compatible(client,monkeypatch):
     assert loaded['cards'][0]['role']=='cover'
     assert loaded['cards'][-1]['role']=='sources'
     assert client.get(f"/api/projects/{project['id']}/cards/0.png").status_code==200
+
+
+def test_settings_and_automatic_issue_workspace(client,monkeypatch):
+    aid=seeded_article(client,monkeypatch)
+    defaults=client.get('/api/settings').json()
+    assert len(defaults['outline'])==6
+    defaults['outline']=[{'role':'cover','heading':'기본 표지'},{'role':'facts','heading':'기본 사실'},{'role':'sources','heading':'출처'}]
+    defaults['design']['layout']='editorial'
+    defaults['design']['accent']='#123456'
+    assert client.put('/api/settings',json=defaults).status_code==200
+    project=client.post('/api/issues/open',json={'article_ids':[aid]}).json()
+    assert len(project['cards'])==3
+    assert project['cards'][0]['heading']=='기본 표지'
+    assert project['design']['layout']=='editorial'
+    assert project['accent']=='#123456'
+    project['cards'][0]['body']='편집해서 저장한 문구'
+    assert client.put(f"/api/projects/{project['id']}",json=project).status_code==200
+    defaults['design']['layout']='classic'
+    client.put('/api/settings',json=defaults)
+    reopened=client.post('/api/issues/open',json={'article_ids':[aid]}).json()
+    assert reopened['id']==project['id']
+    assert reopened['cards'][0]['body']=='편집해서 저장한 문구'
+    assert reopened['design']['layout']=='editorial'
+    assert len(client.get('/api/projects').json())==1
+    client.delete(f"/api/projects/{project['id']}")
+    recreated=client.post('/api/issues/open',json={'article_ids':[aid]}).json()
+    assert recreated['design']['layout']=='classic'
+    assert client.post('/api/issues/open',json={'article_ids':[999]}).status_code==404
+
+
+def test_asset_library_transparent_logo_and_delete_protection(client,monkeypatch):
+    aid=seeded_article(client,monkeypatch)
+    image=Image.new('RGBA',(64,32),(0,0,0,0))
+    from PIL import ImageDraw
+    ImageDraw.Draw(image).rectangle((16,0,48,31),fill=(255,0,0,255))
+    buffer=io.BytesIO();image.save(buffer,format='PNG')
+    asset=client.post('/api/assets?name=logo.png',content=buffer.getvalue()).json()
+    stored=Image.open(io.BytesIO(client.get(f"/api/assets/{asset['id']}.png").content))
+    assert stored.mode=='RGBA'
+    assert stored.getpixel((0,0))[3]==0
+    assert client.get('/api/assets').json()[0]['id']==asset['id']
+    defaults=client.get('/api/settings').json()
+    defaults['design']['logo_id']=asset['id']
+    assert client.put('/api/settings',json=defaults).status_code==200
+    assert client.delete(f"/api/assets/{asset['id']}").status_code==409
+    project=client.post('/api/issues/open',json={'article_ids':[aid]}).json()
+    rendered=Image.open(io.BytesIO(client.get(f"/api/projects/{project['id']}/cards/0.png").content))
+    assert rendered.getpixel((80,80))==(17,24,32)
+    assert rendered.getpixel((130,80))==(255,0,0)
+    defaults['design']['logo_id']=None
+    client.put('/api/settings',json=defaults)
+    assert client.delete(f"/api/assets/{asset['id']}").status_code==409
+    client.delete(f"/api/projects/{project['id']}")
+    assert client.delete(f"/api/assets/{asset['id']}").status_code==204
+    assert client.get(f"/api/assets/{asset['id']}.png").status_code==404
+
+
+def test_summary_combines_sources_without_copyright_noise():
+    articles=[{'id':1,'title':'Climate policy debate worldwide','publisher':'A','summary':'Researchers published a comprehensive report on climate policy. All rights reserved. Copyright 2026.','published_at':rss.utcnow()},
+              {'id':2,'title':'Climate policy debate expands worldwide','publisher':'B','summary':'The public agency will review the report next week.','published_at':rss.utcnow()}]
+    issue=group_issues(articles)[0]
+    assert 'Researchers published' in issue['summary']
+    assert 'public agency' in issue['summary']
+    assert 'Copyright' not in issue['summary']
+    assert 'All rights reserved' not in issue['summary']
+    assert issue['summary_source_ids']==[1,2]
+    assert not issue['needs_review']
+
+
+def test_unused_asset_delete_and_missing_setting_asset(client):
+    asset=client.post('/api/assets',content=image_bytes()).json()
+    defaults=client.get('/api/settings').json()
+    defaults['design']['logo_id']='f'*32
+    assert client.put('/api/settings',json=defaults).status_code==422
+    assert client.delete(f"/api/assets/{asset['id']}").status_code==204
+    assert client.get('/api/assets').json()==[]
+
+
+def test_concurrent_issue_open_creates_one_draft(client,monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    aid=seeded_article(client,monkeypatch)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results=list(pool.map(lambda _:client.post('/api/issues/open',json={'article_ids':[aid]}),range(2)))
+    assert all(response.status_code==200 for response in results)
+    assert results[0].json()['id']==results[1].json()['id']
+    assert len(client.get('/api/projects').json())==1

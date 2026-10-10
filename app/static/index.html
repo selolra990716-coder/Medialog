@@ -14,6 +14,8 @@
     <button class="nav active" data-view="issues"><span>◈</span> 이슈 탐색</button>
     <button class="nav" data-view="projects"><span>▦</span> 제작 보관함</button>
     <button class="nav" data-view="feeds"><span>◉</span> RSS 관리</button>
+    <button class="nav" data-view="assets"><span>▧</span> 자산 보관함</button>
+    <button class="nav" data-view="settings"><span>⚙</span> 환경설정</button>
   </nav>
   <div class="side-bottom"><span class="dot"></span> RSS 기반 뉴스 스튜디오<p>뉴스를 읽고, 맥락을 담고,<br>당신의 이야기로 전달하세요.</p></div>
 </aside>
@@ -32,6 +34,11 @@
     <div id="feed-list"></div>
   </section>
   <section id="projects-view" class="view hidden"><p class="eyebrow">YOUR EDITORIAL ARCHIVE</p><h1>제작 보관함</h1><p class="subtitle">작성 중인 초안과 검토를 마친 카드뉴스를 이어서 편집하세요.</p><div id="project-list" class="issue-grid"></div></section>
+  <section id="assets-view" class="view hidden"><p class="eyebrow">YOUR BRAND ASSETS</p><h1>자산 보관함</h1><p class="subtitle">로고와 자주 사용하는 이미지를 미리 저장하세요. 환경설정이나 카드 편집에서 다시 선택할 수 있습니다.</p><label class="upload-button library-upload">+ 자산 업로드<input id="library-upload" type="file" accept=".jpg,.jpeg,.jfif,.png,.webp,image/jpeg,image/png,image/webp" multiple></label><p class="muted">파일당 8MB · PNG/JPEG/WebP · 투명 PNG 로고 지원</p><div id="asset-library" class="asset-library"></div></section>
+  <section id="settings-view" class="view hidden">
+    <p class="eyebrow">YOUR DEFAULT DESIGN</p><h1>환경설정</h1><p class="subtitle">카드뉴스의 기본 디자인과 구성을 저장하세요. 새 초안을 만들 때 자동으로 불러오며, 제작 중에도 조정할 수 있습니다.</p>
+    <form id="settings-form" class="settings-form" novalidate><div id="settings-design"></div><div class="outline-heading"><h3>기본 장별 구성</h3><label>장수 <select id="settings-count" aria-label="기본 카드 장수"></select></label></div><div id="settings-outline"></div><p class="muted">기본 설정 변경은 기존 카드뉴스에 적용되지 않습니다. 참고 이미지와 링크도 기본 설정에 함께 저장됩니다.</p><div class="settings-actions"><button type="submit" class="primary">기본 설정 저장</button><span id="settings-saved" class="muted" role="status"></span></div></form>
+  </section>
   <section id="editor-view" class="view hidden">
     <div class="editor-top"><button id="back" class="text-button">← 보관함</button><div><button id="save" class="secondary">변경 저장</button><button id="export" class="primary">ZIP 다운로드 ↓</button></div></div>
     <p class="eyebrow">CARD NEWS EDITOR</p><h1 class="editor-title">이야기를 다듬는 시간.</h1><p class="subtitle"><span id="editor-count">6</span>장의 카드 · 1080 × 1350 px · 원문과 사실을 확인한 뒤 내보내세요.</p>
@@ -43,7 +50,7 @@
   </section>
   <footer>MEDIALOG <span>뉴스를 넘어, 맥락을 전달하는 작업 공간.</span></footer>
 </main>
-<dialog id="plan-dialog" class="plan-dialog"><form id="plan-form"><div class="dialog-heading"><div><p class="eyebrow">PLAN YOUR STORY</p><h2>카드뉴스 구성 설정</h2></div><button type="button" id="close-plan" class="text-button" aria-label="설정 닫기">✕</button></div><p id="plan-issue" class="subtitle"></p><div id="plan-design"></div><div class="outline-heading"><h3>장별 구성</h3><label>장수 <select id="plan-count" aria-label="카드 장수"></select></label></div><div id="plan-outline"></div><p class="muted">장별 역할과 제목을 지정하고 화살표로 순서를 바꿀 수 있습니다. RSS 문장만 발췌하므로 배경·영향 내용의 적합성은 직접 검토하세요.</p><div class="dialog-actions"><button type="submit" class="primary">이 구성으로 초안 만들기 →</button></div></form></dialog>
+<dialog id="plan-dialog" class="plan-dialog"><form id="plan-form" novalidate><div class="dialog-heading"><div><p class="eyebrow">PLAN YOUR STORY</p><h2>카드뉴스 구성 설정</h2></div><button type="button" id="close-plan" class="text-button" aria-label="설정 닫기">✕</button></div><p id="plan-issue" class="subtitle"></p><div id="plan-design"></div><div class="outline-heading"><h3>장별 구성</h3><label>장수 <select id="plan-count" aria-label="카드 장수"></select></label></div><div id="plan-outline"></div><p class="muted">장별 역할과 제목을 지정하고 화살표로 순서를 바꿀 수 있습니다. RSS 문장만 발췌하므로 배경·영향 내용의 적합성은 직접 검토하세요.</p><div class="dialog-actions"><div id="plan-status" class="inline-status hidden" role="status" aria-live="polite"></div><button type="submit" class="primary">이 구성으로 초안 만들기 →</button></div></form></dialog>
 <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 </body>
 </html>

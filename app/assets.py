@@ -31,7 +31,8 @@ def store(content, filename):
             if original.format not in ('PNG', 'JPEG', 'WEBP') or original.width * original.height > 20_000_000:
                 raise ValueError('PNG·JPEG·WebP, 최대 2천만 화소 이미지를 사용하세요.')
             original.load()
-            normalized = ImageOps.exif_transpose(original).convert('RGB')
+            has_alpha = 'A' in original.getbands() or 'transparency' in original.info
+            normalized = ImageOps.exif_transpose(original).convert('RGBA' if has_alpha else 'RGB')
             normalized.thumbnail((2400, 2400))
     except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as exc:
         raise ValueError('읽을 수 없는 이미지입니다. PNG·JPEG·WebP를 사용하세요.') from exc

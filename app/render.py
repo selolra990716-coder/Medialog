@@ -70,8 +70,17 @@ def render_card(project, index):
     rule = '#d4ddcf' if light else '#35404a'
     image = Image.new('RGB', (1080, 1350), '#f6f4eb' if light else '#111820')
     draw = ImageDraw.Draw(image)
-    draw.rounded_rectangle((72, 78, 275, 132), radius=27, fill=accent)
-    draw.text((95, 84), 'MEDIALOG', font=font(28), fill='#111820')
+    logo_id = project.get('design', {}).get('logo_id')
+    if logo_id:
+        path = image_path(logo_id)
+        if not path.is_file():
+            raise ValueError('로고 파일을 찾을 수 없습니다. 자산 보관함을 확인하세요.')
+        with Image.open(path) as logo:
+            thumbnail = ImageOps.contain(logo.convert('RGBA'), (240, 80))
+            image.paste(thumbnail, (72, 70), thumbnail)
+    else:
+        draw.rounded_rectangle((72, 78, 275, 132), radius=27, fill=accent)
+        draw.text((95, 84), 'MEDIALOG', font=font(28), fill='#111820')
     draw.text((930, 84), f'{index + 1:02d}', font=font(30), fill=accent)
     draw.line((72, 186, 1008, 186), fill=rule, width=2)
     if layout == 'image':

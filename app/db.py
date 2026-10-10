@@ -37,6 +37,9 @@ def init_db():
             publisher TEXT NOT NULL, title TEXT NOT NULL, url TEXT NOT NULL UNIQUE,
             summary TEXT NOT NULL, published_at TEXT NOT NULL, collected_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1), payload TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS assets (
             id TEXT PRIMARY KEY, name TEXT NOT NULL, width INTEGER NOT NULL,
             height INTEGER NOT NULL, created_at TEXT NOT NULL
@@ -44,5 +47,9 @@ def init_db():
         CREATE TABLE IF NOT EXISTS projects (
             id INTEGER PRIMARY KEY, title TEXT NOT NULL, payload TEXT NOT NULL,
             created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS issue_projects (
+            article_id INTEGER PRIMARY KEY REFERENCES articles(id) ON DELETE CASCADE,
+            project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE
         );
         ''')

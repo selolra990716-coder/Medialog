@@ -31,7 +31,16 @@ def group_issues(articles):
         newest = max(datetime.fromisoformat(a['published_at']) for a in group['articles'])
         age = max(0, (now - newest).total_seconds() / 3600)
         group['score'] = round(group['publisher_count'] * 10 + min(len(group['articles']), 10) * 2 + max(0, 24 - age), 1)
-        group['needs_review'] = not any(len(a['summary']) >= 80 for a in group['articles'])
+        excerpts = collect_excerpts(group['articles'])
+        selected = []
+        for excerpt in excerpts:
+            if len(' '.join(text for text, _ in selected + [excerpt])) <= 900:
+                selected.append(excerpt)
+            if len(selected) == 3:
+                break
+        group['summary'] = ' '.join(text for text, _ in selected)
+        group['summary_source_ids'] = list(dict.fromkeys(id for _, id in selected))
+        group['needs_review'] = sum(len(text) for text, _ in excerpts) < 80
     return sorted(groups, key=lambda g: g['score'], reverse=True)
 
 
@@ -41,13 +50,7 @@ def draft_project(articles, outline=None, design=None):
     design = design or Design().model_dump()
     primary = articles[0]
     sources = [{'article_id': a['id'], 'publisher': a['publisher'], 'title': a['title'], 'url': a['url']} for a in articles]
-    excerpts = []
-    for article in articles:
-        sentences = re.split(r'(?<=[.!?。])\s+|(?<=다\.)\s*', article['summary'])
-        for sentence in sentences:
-            sentence = sentence.strip()
-            if len(sentence) >= 20 and sentence not in [e[0] for e in excerpts]:
-                excerpts.append((sentence[:450], article['id']))
+    excerpts = collect_excerpts(articles)
     cards = []
     excerpt_index = 0
     for item in outline:
@@ -74,3 +77,27 @@ def draft_project(articles, outline=None, design=None):
     return {'title': primary['title'], 'cards': cards, 'sources': sources, 'accent': design['accent'], 'design': design, 'reviewed': False,
             'caption': caption.rstrip(),
             'generation_mode': 'extractive', 'warning': 'RSS 요약 문장을 발췌한 초안입니다. 빈 카드에 확인한 내용을 작성하고 모든 출처와 사실을 검토하세요.'}
+
+
+def collect_excerpts(articles):
+    collected = []
+    seen = set()
+    by_article = []
+    for article in articles:
+        candidates = []
+        for sentence in re.split(r'(?<=[.!?。])\s+|(?<=다\.)\s*', article['summary']):
+            sentence = re.sub(r'\s+', ' ', sentence).strip()
+            if len(sentence) < 20 or re.search(r'무단\s*(전재|복제)|재배포\s*금지|All rights reserved|Copyright', sentence, re.I):
+                continue
+            key = re.sub(r'[^가-힣a-z0-9]', '', sentence.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append((sentence if len(sentence) <= 450 else sentence[:447].rstrip() + '…', article['id']))
+        by_article.append(candidates)
+    # Alternate sources before taking a second sentence from one publisher.
+    for index in range(max((len(rows) for rows in by_article), default=0)):
+        for rows in by_article:
+            if index < len(rows):
+                collected.append(rows[index])
+    return collected

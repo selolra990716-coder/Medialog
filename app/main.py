@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
 from . import db, rss, assets
-from .design import Design, Outline, Layout, Role, default_outline
+from .design import Design, Outline, Layout, Role, default_outline, TemplateSettings
 from .issues import draft_project, group_issues
 from .render import render_card
 
@@ -225,24 +225,59 @@ def issues(q: str = '', days: int = 7):
     return group_issues(articles)
 
 
+def store_draft(conn, payload):
+    ids = list(dict.fromkeys(payload.article_ids))
+    rows = conn.execute(f"SELECT * FROM articles WHERE id IN ({','.join('?' for _ in ids)})", ids).fetchall()
+    lookup = {row['id']: dict(row) for row in rows}
+    if len(lookup) != len(ids):
+        raise HTTPException(404, '선택한 기사를 찾을 수 없습니다. 이슈 목록을 새로 고침하세요.')
+    check_assets(payload.design)
+    draft = draft_project([lookup[i] for i in ids], [row.model_dump() for row in payload.outline], payload.design.model_dump())
+    validated = Project(**draft).model_dump()
+    now = rss.utcnow()
+    cursor = conn.execute('INSERT INTO projects(title,payload,created_at,updated_at) VALUES (?,?,?,?)',
+                          (validated['title'], json.dumps(validated, ensure_ascii=False), now, now))
+    return {'id': cursor.lastrowid, **validated, 'updated_at': now}
+
+
 @app.post('/api/projects', status_code=201)
 def create_project(payload: DraftInput):
-    ids = list(dict.fromkeys(payload.article_ids))
     with db.connect() as conn:
-        rows = conn.execute(f"SELECT * FROM articles WHERE id IN ({','.join('?' for _ in ids)})", ids).fetchall()
-        lookup = {row['id']: dict(row) for row in rows}
-        if len(lookup) != len(ids):
-            raise HTTPException(404, '선택한 기사를 찾을 수 없습니다.')
-        check_assets(payload.design)
-        draft = draft_project([lookup[i] for i in ids], [row.model_dump() for row in payload.outline], payload.design.model_dump())
-        # Source/publisher list may be long. Keep the source card editable without overflowing the image.
-        draft['cards'][-1]['body'] = draft['cards'][-1]['body'][:450]
-        validated = Project(**draft).model_dump()
-        now = rss.utcnow()
-        cursor = conn.execute('INSERT INTO projects(title,payload,created_at,updated_at) VALUES (?,?,?,?)',
-                              (validated['title'], json.dumps(validated, ensure_ascii=False), now, now))
-        project_id = cursor.lastrowid
-    return read_project(project_id)
+        return store_draft(conn, payload)
+
+
+class IssueSelection(BaseModel):
+    article_ids: list[int] = Field(min_length=1, max_length=20)
+
+
+@app.post('/api/issues/open')
+def open_issue(payload: IssueSelection):
+    ids = list(dict.fromkeys(payload.article_ids))
+    placeholders = ','.join('?' for _ in ids)
+    with db.connect() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        if conn.execute(f'SELECT COUNT(*) FROM articles WHERE id IN ({placeholders})', ids).fetchone()[0] != len(ids):
+            raise HTTPException(404, '이슈 기사를 찾을 수 없습니다.')
+        linked = conn.execute(f'SELECT project_id FROM issue_projects WHERE article_id IN ({placeholders}) ORDER BY project_id DESC LIMIT 1', ids).fetchone()
+        project_id = linked['project_id'] if linked else None
+        if project_id is None:
+            # Reuse previously created drafts with the same sources, including edited demo projects.
+            for row in conn.execute('SELECT id,payload FROM projects ORDER BY id DESC'):
+                source_ids = {source['article_id'] for source in json.loads(row['payload'])['sources']}
+                if source_ids == set(ids):
+                    project_id = row['id']
+                    break
+        if project_id is None:
+            settings_row = conn.execute('SELECT payload FROM settings WHERE id=1').fetchone()
+            defaults = TemplateSettings.model_validate_json(settings_row['payload']) if settings_row else TemplateSettings()
+            project = store_draft(conn, DraftInput(article_ids=ids, outline=defaults.outline, design=defaults.design))
+            project_id = project['id']
+        else:
+            project = read_project(project_id)
+        for article_id in ids:
+            conn.execute('INSERT INTO issue_projects(article_id,project_id) VALUES(?,?) ON CONFLICT(article_id) DO UPDATE SET project_id=excluded.project_id',
+                         (article_id, project_id))
+        return project
 
 
 @app.get('/api/projects')
@@ -305,7 +340,7 @@ def export(project_id: int):
 
 
 def check_assets(design):
-    for asset_id in design.image_ids:
+    for asset_id in set(design.image_ids + ([design.logo_id] if design.logo_id else [])):
         try:
             assets.metadata(asset_id)
         except ValueError as exc:
@@ -323,6 +358,8 @@ async def upload_asset(request: Request, name: str = 'reference.png'):
         return await asyncio.to_thread(assets.store, bytes(data), name)
     except ValueError as exc:
         raise HTTPException(422, str(exc))
+    except PermissionError:
+        raise HTTPException(503, '이미지 저장 권한이 없습니다. ZIP을 모두 풀고 쓰기 가능한 일반 폴더에서 실행하세요.')
 
 
 @app.get('/api/assets/{asset_id}/info')
@@ -340,3 +377,46 @@ def asset_image(asset_id: str):
         return FileResponse(assets.image_path(asset_id), media_type='image/png')
     except ValueError as exc:
         raise HTTPException(404, str(exc))
+
+
+@app.get('/api/settings')
+def get_settings():
+    with db.connect() as conn:
+        row = conn.execute('SELECT payload FROM settings WHERE id=1').fetchone()
+    return TemplateSettings.model_validate_json(row['payload']) if row else TemplateSettings()
+
+
+@app.put('/api/settings')
+def save_settings(payload: TemplateSettings):
+    check_assets(payload.design)
+    with db.connect() as conn:
+        conn.execute('INSERT INTO settings(id,payload) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload',
+                     (payload.model_dump_json(),))
+    return payload
+
+
+@app.get('/api/assets')
+def list_assets():
+    with db.connect() as conn:
+        return [dict(row) for row in conn.execute('SELECT * FROM assets ORDER BY created_at DESC')]
+
+
+@app.delete('/api/assets/{asset_id}', status_code=204)
+def delete_asset(asset_id: str):
+    try:
+        assets.metadata(asset_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+    with db.connect() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        documents = [json.loads(row['payload']) for row in conn.execute('SELECT payload FROM projects')]
+        documents += [json.loads(row['payload']) for row in conn.execute('SELECT payload FROM settings')]
+        for document in documents:
+            design = document.get('design', {})
+            if asset_id in design.get('image_ids', []) or asset_id == design.get('logo_id') or any(card.get('image_id') == asset_id for card in document.get('cards', [])):
+                raise HTTPException(409, '사용 중인 자산입니다. 기본 설정과 제작물에서 해당 이미지·로고를 해제한 뒤 삭제하세요.')
+        try:
+            assets.image_path(asset_id).unlink()
+        except OSError:
+            raise HTTPException(503, '이미지 파일을 삭제할 수 없습니다. 폴더 권한을 확인하세요.')
+        conn.execute('DELETE FROM assets WHERE id=?', (asset_id,))
