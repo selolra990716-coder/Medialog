@@ -91,6 +91,9 @@ def draft_project(articles, outline=None, design=None):
         photo = next((a.get('image_id') for a in articles if a['id'] in source_ids and a.get('image_id')), None)
         if not photo:
             photo = next((a.get('image_id') for a in articles if a.get('image_id')), None)
+        if design.get('layout') == 'breaking':
+            # RSS images may already be cropped; leave selection to the editor or AI.
+            photo = None
         cards.append({'role': role, 'heading': item['heading'], 'body': format_card_body(body) if role not in ('cover', 'sources', 'custom') else body, 'source_ids': source_ids,
                       'layout': None, 'image_id': photo or (design['image_ids'][0] if design['image_ids'] and design.get('layout') not in ('breaking', 'poster') else None)})
     caption = primary['title'] + '\n\n'

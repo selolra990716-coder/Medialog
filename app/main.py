@@ -318,8 +318,6 @@ def store_draft(conn, payload):
 async def create_project(payload: DraftInput):
     if os.getenv('MEDIALOG_ORIGINALS','1') == '1' and not ai_images.config()['research_enabled']:
         await article_text.prepare(payload.article_ids)
-    if not ai_images.config()['enabled']:
-        await prepare_article_images(payload.article_ids)
     with db.connect() as conn:
         result = store_draft(conn, payload)
     if not news_research.start(result['id'],automatic=True):
@@ -335,8 +333,6 @@ class IssueSelection(BaseModel):
 async def open_issue(payload: IssueSelection):
     if os.getenv('MEDIALOG_ORIGINALS','1') == '1' and not ai_images.config()['research_enabled']:
         await article_text.prepare(payload.article_ids)
-    if not ai_images.config()['enabled']:
-        await prepare_article_images(payload.article_ids)
     ids = list(dict.fromkeys(payload.article_ids))
     placeholders = ','.join('?' for _ in ids)
     created=False

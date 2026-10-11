@@ -551,3 +551,19 @@ for(const kind of ['logo','badge']) {
     finally {state.uploads--; event.target.disabled=false;event.target.value='';}
   };
 }
+
+$('#upload-card-photo').onchange=async event=>{
+  const file=event.target.files[0]; if(!file || !state.project) return;
+  const project=state.project, cardIndex=state.card;
+  if(project.design.image_ids.length>=10) {toast('참고 이미지에서 사용하지 않는 사진을 해제하세요. 최대 10개입니다.',true);event.target.value='';return;}
+  applyCard();state.uploads++;event.target.disabled=true;
+  try {
+    const asset=await api(`/api/assets?name=${encodeURIComponent(file.name)}`,{method:'POST',headers:{'Content-Type':file.type || 'application/octet-stream'},body:file});
+    state.assets[asset.id]=asset;state.library.unshift(asset);project.design.image_ids.push(asset.id);
+    project.cards[cardIndex].image_id=asset.id;project.cards[cardIndex].ai_background=false;
+    if(state.project===project) {markDirty();renderDesigner('editor',project.design);showCard();}
+    toast('사진을 교체했습니다. 변경 저장을 눌러 적용하세요.');
+  } catch(error) {toast(error.message,true);}
+  finally {state.uploads--;event.target.disabled=false;event.target.value='';}
+};
+$('#clear-card-photo').onclick=()=>{applyCard();state.project.cards[state.card].image_id=null;state.project.cards[state.card].ai_background=false;markDirty();showCard();};

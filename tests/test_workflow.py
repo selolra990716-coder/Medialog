@@ -719,3 +719,19 @@ def test_editor_typography_persists_and_changes_actual_png(client, monkeypatch):
     assert not any(r>240 and g>240 and b>240 for r,g,b in image.crop((700,400,980,470)).getdata())
     project['cards'][0]['font_size']=200
     assert client.put(f"/api/projects/{project['id']}",json=project).status_code==422
+
+
+def test_breaking_draft_does_not_auto_select_cropped_rss_photo(client,monkeypatch):
+    from app.presets import breaking_template
+    aid=seeded_article(client,monkeypatch)
+    asset=client.post('/api/assets?name=photo.png',content=image_bytes()).json()
+    with db.connect() as conn:
+        conn.execute('UPDATE articles SET image_id=?,image_url=? WHERE id=?',(asset['id'],'https://example.com/cropped.jpg',aid))
+    template=breaking_template()
+    project=client.post('/api/projects',json={'article_ids':[aid],'outline':[row.model_dump() for row in template.outline],'design':template.design.model_dump()}).json()
+    assert all(card['image_id'] is None for card in project['cards'])
+    project['cards'][1]['image_id']=asset['id']
+    assert client.put(f"/api/projects/{project['id']}",json=project).status_code==200
+    saved=client.get(f"/api/projects/{project['id']}").json()
+    assert saved['cards'][1]['image_id']==asset['id']
+    assert saved['cards'][0]['image_id'] is None
