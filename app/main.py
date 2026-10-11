@@ -13,9 +13,9 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
-from . import db, rss, assets, ai_images
+from . import db, rss, assets, ai_images, article_text, news_research
 from .design import Design, Outline, Layout, Role, default_outline, TemplateSettings
-from .issues import draft_project, group_issues
+from .issues import draft_project, group_issues, noteworthy
 from .render import render_card
 
 log = logging.getLogger('medialog')
@@ -33,7 +33,7 @@ async def collect_all():
         async def collect(feed):
             async with semaphore:
                 try:
-                    items = await rss.fetch_feed(feed['url'])
+                    items = [item for item in await rss.fetch_feed(feed['url']) if noteworthy(item['title'])][:30]
                     added = 0
                     with db.connect() as conn:
                         for item in items:
@@ -84,6 +84,9 @@ async def lifespan(app):
     if os.getenv('MEDIALOG_SCHEDULER', '1') == '1':
         task = asyncio.create_task(schedule())
     yield
+    pending=list(news_research.tasks|ai_images.tasks)
+    for background in pending:background.cancel()
+    if pending:await asyncio.gather(*pending,return_exceptions=True)
     if task:
         task.cancel()
         with suppress(asyncio.CancelledError):
@@ -135,6 +138,17 @@ class Card(BaseModel):
     image_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')
 
 
+class ResearchEvidence(BaseModel):
+    @model_validator(mode='after')
+    def valid_url(self):
+        self.url=rss.canonical_url(self.url)
+        return self
+
+    card_index: int = Field(ge=0,le=9)
+    url: str = Field(max_length=2000)
+    quote: str = Field(max_length=2000)
+
+
 class Project(BaseModel):
     title: str = Field(min_length=1, max_length=500)
     cards: list[Card] = Field(min_length=3, max_length=10)
@@ -143,6 +157,7 @@ class Project(BaseModel):
     accent: str = Field(pattern=r'^#[0-9a-fA-F]{6}$')
     caption: str = Field(max_length=10000)
     reviewed: bool = False
+    research_evidence: list[ResearchEvidence] = Field(default_factory=list,max_length=30)
     generation_mode: str = 'extractive'
     warning: str = Field(default='', max_length=1000)
 
@@ -235,7 +250,9 @@ async def collect():
 
 
 @app.get('/api/issues')
-def issues(q: str = '', days: int = 7):
+def issues(q: str = '', days: int = 7, limit: int = 12):
+    if limit < 1 or limit > 50:
+        raise HTTPException(400,'이슈 개수는 1~50개입니다.')
     if days < 1 or days > 365:
         raise HTTPException(400, '조회 기간은 1~365일입니다.')
     from datetime import datetime, timedelta, timezone
@@ -244,7 +261,7 @@ def issues(q: str = '', days: int = 7):
         articles = [dict(row) for row in conn.execute('SELECT * FROM articles WHERE published_at>=? ORDER BY published_at DESC LIMIT 1000', (cutoff,))]
     if q:
         articles = [a for a in articles if q.lower() in (a['title'] + ' ' + a['summary'] + ' ' + a['publisher']).lower()]
-    return group_issues(articles)
+    return group_issues(articles)[:limit]
 
 
 async def prepare_article_images(ids):
@@ -262,6 +279,16 @@ async def prepare_article_images(ids):
             log.warning('Article image unavailable for article %s', row['id'])
 
 
+def apply_original_text(project, articles):
+    body, source_ids, (impact, impact_ids) = article_text.fact_paragraphs(articles)
+    for card in project['cards']:
+        if card['role'] == 'facts':card.update(body=body,source_ids=source_ids)
+        elif card['role'] == 'impact':card.update(body=impact,source_ids=impact_ids)
+    project['reviewed']=False
+    project['generation_mode']='original-extractive'
+    project['warning']='공개 기사 본문에서 경기 결과·주요 활약·전망 관련 문장을 발췌했습니다. 수치와 출처를 검토하세요.'
+
+
 def store_draft(conn, payload):
     ids = list(dict.fromkeys(payload.article_ids))
     rows = conn.execute(f"SELECT * FROM articles WHERE id IN ({','.join('?' for _ in ids)})", ids).fetchall()
@@ -269,7 +296,10 @@ def store_draft(conn, payload):
     if len(lookup) != len(ids):
         raise HTTPException(404, '선택한 기사를 찾을 수 없습니다. 이슈 목록을 새로 고침하세요.')
     check_assets(payload.design)
+    selected_articles = [lookup[i] for i in ids]
     draft = draft_project([lookup[i] for i in ids], [row.model_dump() for row in payload.outline], payload.design.model_dump())
+    if any(a.get('article_text') for a in selected_articles):
+        apply_original_text(draft, selected_articles)
     validated = Project(**draft).model_dump()
     now = rss.utcnow()
     cursor = conn.execute('INSERT INTO projects(title,payload,created_at,updated_at) VALUES (?,?,?,?)',
@@ -279,11 +309,14 @@ def store_draft(conn, payload):
 
 @app.post('/api/projects', status_code=201)
 async def create_project(payload: DraftInput):
+    if os.getenv('MEDIALOG_ORIGINALS','1') == '1' and not ai_images.config()['research_enabled']:
+        await article_text.prepare(payload.article_ids)
     if not ai_images.config()['enabled']:
         await prepare_article_images(payload.article_ids)
     with db.connect() as conn:
         result = store_draft(conn, payload)
-    ai_images.start(result['id'], automatic=True)
+    if not news_research.start(result['id'],automatic=True):
+        ai_images.start(result['id'], automatic=True)
     return result
 
 
@@ -293,10 +326,13 @@ class IssueSelection(BaseModel):
 
 @app.post('/api/issues/open')
 async def open_issue(payload: IssueSelection):
+    if os.getenv('MEDIALOG_ORIGINALS','1') == '1' and not ai_images.config()['research_enabled']:
+        await article_text.prepare(payload.article_ids)
     if not ai_images.config()['enabled']:
         await prepare_article_images(payload.article_ids)
     ids = list(dict.fromkeys(payload.article_ids))
     placeholders = ','.join('?' for _ in ids)
+    created=False
     with db.connect() as conn:
         conn.execute('BEGIN IMMEDIATE')
         if conn.execute(f'SELECT COUNT(*) FROM articles WHERE id IN ({placeholders})', ids).fetchone()[0] != len(ids):
@@ -315,13 +351,16 @@ async def open_issue(payload: IssueSelection):
             defaults = TemplateSettings.model_validate_json(settings_row['payload']) if settings_row else TemplateSettings()
             project = store_draft(conn, DraftInput(article_ids=ids, outline=defaults.outline, design=defaults.design))
             project_id = project['id']
-            ai_images.start(project_id, automatic=True)
+            created=True
         else:
             project = read_project(project_id)
+        conn.execute(f'UPDATE articles SET open_count=open_count+1 WHERE id=?',(ids[0],))
         for article_id in ids:
             conn.execute('INSERT INTO issue_projects(article_id,project_id) VALUES(?,?) ON CONFLICT(article_id) DO UPDATE SET project_id=excluded.project_id',
                          (article_id, project_id))
-        return project
+    if created and not news_research.start(project_id,automatic=True):
+        ai_images.start(project_id,automatic=True)
+    return project
 
 
 @app.get('/api/projects')
@@ -336,8 +375,14 @@ def project(project_id: int):
     return read_project(project_id)
 
 
+def ensure_editable(project_id):
+    if news_research.jobs.get(project_id,{}).get('status')=='running':
+        raise HTTPException(409,'AI 기사 검색이 진행 중입니다. 완료 후 저장하세요.')
+
+
 @app.put('/api/projects/{project_id}')
 def save_project(project_id: int, payload: Project):
+    ensure_editable(project_id)
     if ai_images.jobs.get(project_id,{}).get('status') == 'running':
         raise HTTPException(409,'AI 배경 생성이 진행 중입니다. 완료 후 저장하세요.')
     read_project(project_id)
@@ -367,28 +412,46 @@ def card_png(project_id: int, index: int):
     return Response(content, media_type='image/png', headers={'Cache-Control': 'no-store'})
 
 
+@app.post('/api/projects/{project_id}/research')
+async def research_project(project_id:int):
+    read_project(project_id)
+    if ai_images.jobs.get(project_id,{}).get('status')=='running':
+        raise HTTPException(409,'배경 이미지 생성 완료 후 재검색하세요.')
+    if not news_research.start(project_id):
+        raise HTTPException(422,'환경설정에서 OpenAI API 키를 등록하세요.')
+    return {'status':'running'}
+
+
+@app.get('/api/projects/{project_id}/research')
+def research_status(project_id:int):
+    read_project(project_id)
+    return news_research.jobs.get(project_id,{'status':'idle','error':None,'source_count':0})
+
+
 class AIConfigInput(BaseModel):
     key: str = Field(default='',max_length=300)
     enabled: bool = False
+    research_enabled: bool = False
 
 
 @app.get('/api/ai/settings')
 def ai_settings():
     configured = ai_images.config()
-    return {'configured':bool(configured['key']), 'enabled':configured['enabled']}
+    return {'configured':bool(configured['key']), 'enabled':configured['enabled'],'research_enabled':configured['research_enabled']}
 
 
 @app.put('/api/ai/settings')
 def save_ai_settings(payload: AIConfigInput):
     try:
-        ai_images.save_config(payload.key.strip(),payload.enabled)
+        ai_images.save_config(payload.key.strip(),payload.enabled,payload.research_enabled)
     except ValueError as exc:
         raise HTTPException(422,str(exc))
     return ai_settings()
 
 
 @app.post('/api/projects/{project_id}/ai-backgrounds')
-def generate_backgrounds(project_id: int):
+async def generate_backgrounds(project_id: int):
+    ensure_editable(project_id)
     read_project(project_id)
     if not ai_images.start(project_id):
         raise HTTPException(422,'환경설정에서 OpenAI API 키를 입력하세요.')
@@ -401,14 +464,32 @@ def background_status(project_id: int):
     return ai_images.jobs.get(project_id,{'status':'idle','completed':0,'error':None})
 
 
+@app.post('/api/projects/{project_id}/analyze-original')
+async def analyze_original(project_id: int):
+    ensure_editable(project_id)
+    if ai_images.jobs.get(project_id,{}).get('status')=='running':
+        raise HTTPException(409,'AI 배경 생성 완료 후 기사 분석을 실행하세요.')
+    project=read_project(project_id)
+    ids=[source['article_id'] for source in project['sources']]
+    await article_text.prepare(ids)
+    with db.connect() as conn:
+        articles=[dict(row) for row in conn.execute('SELECT * FROM articles') if row['id'] in ids]
+        if not any(article.get('article_text') for article in articles):
+            raise HTTPException(422,'기사 본문에 접근하지 못했습니다. 공개 RSS 정보만 유지했습니다. 언론사 접근 제한 또는 네트워크를 확인하세요.')
+        apply_original_text(project,articles)
+        conn.execute('UPDATE projects SET payload=?,updated_at=? WHERE id=?',(json.dumps(project,ensure_ascii=False),rss.utcnow(),project_id))
+    return read_project(project_id)
+
+
 @app.post('/api/projects/{project_id}/impact-card')
 def replace_impact_card(project_id: int):
+    ensure_editable(project_id)
     from .issues import impact_excerpt
     project = read_project(project_id)
     ids = [source['article_id'] for source in project['sources']]
     with db.connect() as conn:
         rows = [dict(row) for row in conn.execute('SELECT * FROM articles') if row['id'] in ids]
-        body, source_ids = impact_excerpt(rows)
+        body, source_ids = impact_excerpt([{**row,'summary':row.get('article_text') or row['summary']} for row in rows])
         project['cards'][2].update(role='impact', heading='영향과 전망', body=body, source_ids=source_ids)
         project['reviewed'] = False
         project['warning'] = ('RSS에서 영향·전망 관련 문장을 발췌했습니다. 원문을 검토하세요.' if body else
@@ -420,6 +501,7 @@ def replace_impact_card(project_id: int):
 
 @app.post('/api/projects/{project_id}/format-body')
 def format_project_body(project_id: int):
+    ensure_editable(project_id)
     from .headlines import format_card_body
     project = read_project(project_id)
     for card in project['cards']:
@@ -434,6 +516,7 @@ def format_project_body(project_id: int):
 
 @app.post('/api/projects/{project_id}/summarize-cover')
 def summarize_cover(project_id: int):
+    ensure_editable(project_id)
     from .headlines import summarize_title
     project = read_project(project_id)
     title = project['sources'][0]['title'] if project['sources'] else project['title']
@@ -462,6 +545,8 @@ def export(project_id: int):
                 archive.writestr(f'card-{index + 1:02d}.png', render_card(project, index))
             archive.writestr('caption.txt', project['caption'])
             archive.writestr('sources.json', json.dumps(project['sources'], ensure_ascii=False, indent=2))
+            if project.get('research_evidence'):
+                archive.writestr('research-evidence.json',json.dumps(project['research_evidence'],ensure_ascii=False,indent=2))
             archive.writestr('design.json', json.dumps(project.get('design', {}), ensure_ascii=False, indent=2))
     except ValueError as exc:
         raise HTTPException(422, str(exc))

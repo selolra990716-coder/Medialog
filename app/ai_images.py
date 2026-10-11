@@ -7,6 +7,7 @@ import httpx
 from . import assets, db, rss
 
 jobs = {}
+tasks = set()
 
 
 def config():
@@ -15,15 +16,16 @@ def config():
         saved = json.loads(path.read_text()) if path.exists() else {}
     except (ValueError, OSError):
         saved = {}
-    return {'key':os.getenv('OPENAI_API_KEY') or saved.get('key',''), 'enabled':saved.get('enabled',False)}
+    return {'key':os.getenv('OPENAI_API_KEY') or saved.get('key',''), 'enabled':saved.get('enabled',False),'research_enabled':saved.get('research_enabled',False)}
 
 
-def save_config(key, enabled):
+def save_config(key, enabled, research_enabled=False):
     saved = config()
     if key:
         saved['key'] = key
     saved['enabled'] = enabled
-    if enabled and not saved['key']:
+    saved['research_enabled'] = research_enabled
+    if (enabled or research_enabled) and not saved['key']:
         raise ValueError('먼저 OpenAI API 키를 입력하세요.')
     path = db.db_path().parent / 'ai-config.json'
     path.parent.mkdir(parents=True,exist_ok=True)
@@ -62,7 +64,8 @@ def start(project_id, automatic=False):
     if jobs.get(project_id,{}).get('status') == 'running':
         return True
     jobs[project_id] = {'status':'running','completed':0,'error':None}
-    asyncio.create_task(run(project_id, settings['key']))
+    task=asyncio.create_task(run(project_id, settings['key']))
+    tasks.add(task);task.add_done_callback(tasks.discard)
     return True
 
 

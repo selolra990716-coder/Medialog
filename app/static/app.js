@@ -21,7 +21,7 @@ function toast(message, error = false) {
 }
 async function api(path, options = {}) {
   let response;
-  try {response = await fetch(path, {signal: AbortSignal.timeout(path==='/api/collect'?120000:30000), headers: {'Content-Type': 'application/json'}, ...options});}
+  try {response = await fetch(path, {signal: AbortSignal.timeout((path==='/api/collect'||path.includes('analyze-original'))?120000:30000), headers: {'Content-Type': 'application/json'}, ...options});}
   catch(error) {throw new Error(error.name==='TimeoutError'?'응답이 지연되고 있습니다. 잠시 후 다시 확인하세요.':'서버에 연결할 수 없습니다. 실행 창이 열려 있는지 확인하세요.');}
   if (!response.ok) {
     let data;
@@ -52,7 +52,7 @@ async function showView(view) {
     if (view === 'issues') await loadIssues();
     if (view === 'feeds') await loadFeeds();
     if (view === 'projects') await loadProjects();
-    if (view === 'settings') {await loadSettings(); const ai=await api('/api/ai/settings');$('#ai-enabled').checked=ai.enabled;$('#ai-config-status').textContent=ai.configured?'API 키 등록됨':'API 키 미등록';}
+    if (view === 'settings') {await loadSettings(); const ai=await api('/api/ai/settings');$('#ai-enabled').checked=ai.enabled;$('#research-enabled').checked=ai.research_enabled;$('#ai-config-status').textContent=ai.configured?'API 키 등록됨':'API 키 미등록';}
     if (view === 'assets') await loadAssets();
   } catch (error) { toast(error.message, true); }
 }
@@ -114,6 +114,9 @@ async function openEditor(project) {
   $('#editor-count').textContent = project.cards.length;
   await loadAssetNames(project.design);
   renderDesigner('editor', project.design);
+  unlockResearch();
+  renderResearchEvidence(project);
+  monitorResearch(project.id);
   monitorBackgrounds(project.id);
   $('#source-links').innerHTML = '<p class="muted">원문 확인</p>' + project.sources.map(source => `<a href="${escapeHTML(source.url)}" target="_blank" rel="noopener noreferrer">↗ ${escapeHTML(source.publisher)} · ${escapeHTML(source.title)}</a>`).join('');
   showCard();
@@ -192,8 +195,44 @@ $('#collect').onclick = () => busy($('#collect'), async () => {
 ['#card-heading','#card-body','#project-title','#caption','#accent','#card-layout','#card-image'].forEach(selector => $(selector).oninput = () => markDirty());
 $('#reviewed').onchange = () => markDirty(false);
 $('#ai-save').onclick=()=>busy($('#ai-save'),async()=>{
-  const result=await api('/api/ai/settings',{method:'PUT',body:JSON.stringify({key:$('#ai-key').value,enabled:$('#ai-enabled').checked})});
-  $('#ai-key').value='';$('#ai-config-status').textContent=result.configured?'API 키 등록됨':'API 키 미등록';toast('AI 이미지 설정을 저장했습니다.');
+  const result=await api('/api/ai/settings',{method:'PUT',body:JSON.stringify({key:$('#ai-key').value,enabled:$('#ai-enabled').checked,research_enabled:$('#research-enabled').checked})});
+  $('#ai-key').value='';$('#ai-config-status').textContent=result.configured?'API 키 등록됨':'API 키 미등록';toast('AI 검색과 이미지 설정을 저장했습니다.');
+});
+let researchTimer;
+function unlockResearch() {
+  $('.editor-panel').inert=false;$('#save').disabled=false;$('#export').disabled=false;
+}
+function renderResearchEvidence(project) {
+  const evidence=project.research_evidence||[];
+  $('#research-details').classList.toggle('hidden',!evidence.length);
+  $('#research-evidence').innerHTML=evidence.map(item=>`<p><strong>${item.card_index+1}번째 카드</strong> · ${escapeHTML(item.quote)}<br><a href="${escapeHTML(item.url)}" target="_blank" rel="noopener">확인 기사 ↗</a></p>`).join('');
+}
+async function monitorResearch(id) {
+  clearTimeout(researchTimer);
+  if(state.project?.id!==id || state.view!=='editor') return;
+  try {
+    const job=await api(`/api/projects/${id}/research`);
+    if(state.project?.id!==id || state.view!=='editor') return;
+    $('#research-progress').textContent=job.status==='running'?'AI가 기사를 재검색하고 본문 근거를 확인하는 중입니다.':(job.error||'');
+    if(job.status==='running') {
+      $('.editor-panel').inert=true;$('#save').disabled=true;$('#export').disabled=true;
+      researchTimer=setTimeout(()=>monitorResearch(id),3000);
+    } else if(job.status==='done' && state.project.generation_mode!=='web-researched') {
+      const selected=state.card;
+      const latest=await api(`/api/projects/${id}`);
+      if(state.project?.id!==id || state.view!=='editor') return;
+      state.project=latest;state.dirty=false;state.card=selected;
+      $('#caption').value=latest.caption;$('#reviewed').checked=false;$('#draft-warning').textContent=latest.warning;
+      $('#source-links').innerHTML='<p class="muted">원문 확인</p>'+latest.sources.map(source=>`<a href="${escapeHTML(source.url)}" target="_blank" rel="noopener">↗ ${escapeHTML(source.publisher)} · ${escapeHTML(source.title)}</a>`).join('');
+      renderResearchEvidence(latest);showCard();unlockResearch();
+      $('#research-progress').textContent=`기사 ${job.source_count}개에 근거해 본문을 작성했습니다.`;
+      monitorBackgrounds(id);
+    } else {unlockResearch();if(job.status==='done') $('#research-progress').textContent=`기사 ${job.source_count}개에 근거해 본문을 작성했습니다.`;}
+  } catch(error) {unlockResearch();$('#research-progress').textContent=error.message;}
+}
+$('#research-news').onclick=()=>busy($('#research-news'),async()=>{
+  await saveProject();await api(`/api/projects/${state.project.id}/research`,{method:'POST'});
+  state.project.generation_mode='research-pending';monitorResearch(state.project.id);
 });
 let backgroundTimer;
 async function monitorBackgrounds(id) {
@@ -223,6 +262,13 @@ $('#impact-card').onclick=()=>busy($('#impact-card'),async()=>{
   const project=await api(`/api/projects/${state.project.id}/impact-card`,{method:'POST'});
   await openEditor(project);state.card=2;showCard();
   toast(project.cards[2].body?'세 번째 카드에 영향과 전망 문장을 적용했습니다.':'RSS에 전망 정보가 없어 문구를 비워 두었습니다. 원문을 확인해 작성하세요.');
+});
+$('#analyze-original').onclick=()=>busy($('#analyze-original'),async()=>{
+  await saveProject();
+  const selected=state.card;
+  const project=await api(`/api/projects/${state.project.id}/analyze-original`,{method:'POST'});
+  await openEditor(project);state.card=selected;showCard();
+  toast('기사 본문에서 경기 결과와 주요 활약 내용을 적용했습니다.');
 });
 $('#format-body').onclick=()=>busy($('#format-body'),async()=>{
   await saveProject();

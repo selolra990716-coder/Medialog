@@ -9,6 +9,7 @@ def summarize_title(title, limit=48):
     text = re.sub(r'\s*[\[(](?:종합\d*|속보|영상|사진|포토)[\])]\s*$', '', text)
     text = re.sub(r'[‘’“”「」]', '', text)
     text = re.sub(r'\s*행진\s*$', '', text)
+    text = re.sub(r'\b\d{2,3}\s*[-–:]\s*\d{2,3}\s*(?:역전승|승리|승)\b[, ]*', '', text)
     clauses = re.split(r'\s*(?:…+|\.{3,})\s*', text)
     if len(clauses) > 1:
         lead, event = clauses[0], clauses[-1]

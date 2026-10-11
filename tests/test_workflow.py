@@ -25,6 +25,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv('MEDIALOG_DB', str(tmp_path / 'test.sqlite3'))
     monkeypatch.setenv('MEDIALOG_SCHEDULER', '0')
     monkeypatch.setenv('MEDIALOG_PRESETS', '0')
+    monkeypatch.setenv('MEDIALOG_ORIGINALS', '0')
     monkeypatch.setattr(rss, 'validate_public_url', AsyncMock(side_effect=lambda url: rss.canonical_url(url)))
     with TestClient(app) as instance:
         yield instance
@@ -429,7 +430,7 @@ def test_breaking_reference_design_renders_photo_and_long_body(client):
     rendered = Image.open(io.BytesIO(render_card(project, 0)))
     assert rendered.size == (1080,1350)
     assert rendered.getpixel((0,0)) == (36,54,18)
-    assert rendered.getpixel((500,255)) == (230,0,18)
+    assert rendered.getpixel((500,182)) == (230,0,18)
     assert Image.open(io.BytesIO(render_card(project,1))).size == (1080,1350)
     assert client.post('/api/assets/'+asset['id']+'/style').status_code == 200
 
@@ -544,7 +545,7 @@ def test_ai_config_and_three_backgrounds(client,monkeypatch):
     monkeypatch.delenv('OPENAI_API_KEY',raising=False)
     assert client.put('/api/ai/settings',json={'enabled':True}).status_code==422
     result=client.put('/api/ai/settings',json={'key':'test-private-key','enabled':False})
-    assert result.json()=={'configured':True,'enabled':False}
+    assert result.json()=={'configured':True,'enabled':False,'research_enabled':False}
     assert 'test-private-key' not in client.get('/api/ai/settings').text
     aid=seeded_article(client,monkeypatch)
     from app.presets import breaking_template
@@ -599,5 +600,78 @@ def test_custom_banner_is_kept_on_cover_only(client):
                     {'role':'facts','heading':'핵심 내용','body':'첫 번째 문단입니다.\n\n다음 문단에서 자세히 설명합니다.','source_ids':[]}]}
     cover=Image.open(io.BytesIO(render_card(draft,0)))
     content=Image.open(io.BytesIO(render_card(draft,1)))
-    assert cover.getpixel((550,280))[0]>200
+    assert cover.getpixel((550,205))[0]>200
     assert content.getpixel((550,280))==(25,27,29)
+
+
+def test_original_article_extracts_winner_and_player_with_evidence(client,monkeypatch):
+    from app import article_text
+    html='''<html><nav><p>이 문장은 메뉴 항목으로 경기 결과에 포함되면 안 됩니다.</p></nav><article>
+    <p>(서울=연합뉴스) 홍길동 기자 = 서울 삼성은 서울 SK를 90-85로 꺾고 개막 3연승을 기록했다고 구단은 밝혔다.</p>
+    <p>테스트 선수 김민수는 25점과 8리바운드를 기록하며 승리를 이끌었다고 구단이 밝혔다.</p>
+    <p>삼성은 다음 주 원정 경기를 치를 예정이며 연승을 이어가는 것이 과제라고 밝혔다.</p>
+    </article><footer><p>이 문장은 저작권 안내이며 기사 본문에 들어가면 안 됩니다.</p></footer></html>'''
+    text=article_text.extract_article(html)
+    assert '메뉴 항목' not in text and '저작권 안내' not in text
+    assert '90-85' in text and '25점' in text
+    monkeypatch.setattr(article_text,'fetch_article',AsyncMock(return_value=text))
+    monkeypatch.setenv('MEDIALOG_ORIGINALS','1')
+    aid=seeded_article(client,monkeypatch)
+    from app.presets import breaking_template
+    template=breaking_template()
+    project=client.post('/api/projects',json={'article_ids':[aid],'design':template.design.model_dump(),'outline':[row.model_dump() for row in template.outline]}).json()
+    assert '서울 SK' in project['cards'][1]['body']
+    assert '90-85' in project['cards'][1]['body']
+    assert '김민수' in project['cards'][1]['body']
+    assert '25점' in project['cards'][1]['body']
+    assert '기자 =' not in project['cards'][1]['body']
+    assert '예정' in project['cards'][2]['body']
+    assert project['generation_mode']=='original-extractive'
+    result=client.post(f"/api/projects/{project['id']}/analyze-original")
+    assert result.status_code==200
+    assert result.json()['sources']==project['sources']
+
+
+def test_original_fetch_failure_preserves_existing_edits(client,monkeypatch):
+    from app import article_text
+    aid=seeded_article(client,monkeypatch)
+    project=client.post('/api/projects',json={'article_ids':[aid]}).json()
+    project['cards'][1]['body']='기존에 편집한 문구입니다.'
+    client.put(f"/api/projects/{project['id']}",json=project)
+    monkeypatch.setattr(article_text,'fetch_article',AsyncMock(side_effect=ValueError('blocked')))
+    assert client.post(f"/api/projects/{project['id']}/analyze-original").status_code==422
+    assert client.get(f"/api/projects/{project['id']}").json()['cards'][1]['body']=='기존에 편집한 문구입니다.'
+
+
+def test_cover_uses_two_lines_or_smaller_three_line_text():
+    from app.render import fit_cover,bold_font
+    from PIL import ImageDraw
+    from app.headlines import summarize_title
+    draw=ImageDraw.Draw(Image.new('RGB',(1080,1350)))
+    face,lines,spacing=fit_cover('삼성, 소노 꺾고 개막 3연승',draw)
+    assert len(lines)==2
+    assert all(draw.textlength(line,font=face)<=930 for line in lines)
+    assert summarize_title('삼성, 소노에 82-81 역전승 개막 3연승')=='삼성, 소노에 개막 3연승'
+    face,lines,spacing=fit_cover('지역 교통 개선을 위한 새로운 노선 확대와 주민 의견 수렴 계획 발표',draw)
+    assert len(lines)<=3
+    if len(lines)==3:assert face.size<=88
+
+
+def test_priority_feed_is_limited_filters_minor_items_and_counts_local_clicks(client,monkeypatch):
+    from app.issues import group_issues,noteworthy
+    assert not noteworthy('[부고] 홍길동씨 별세')
+    assert not noteworthy('[프로농구 중간순위] 11일')
+    assert noteworthy('삼성, 소노 꺾고 개막 3연승')
+    with db.connect() as conn:
+        for i in range(16):
+            conn.execute('INSERT INTO articles(publisher,title,url,summary,published_at,collected_at) VALUES(?,?,?,?,?,?)',
+                         ('테스트',f'독립소식{i}',f'https://example.com/news/{i}','확인된 테스트 기사 내용을 담은 충분한 길이의 문장입니다.',rss.utcnow(),rss.utcnow()))
+    assert len(client.get('/api/issues').json())==12
+    assert len(client.get('/api/issues?limit=6').json())==6
+    assert client.get('/api/issues?limit=0').status_code==400
+    article=client.get('/api/issues').json()[0]['articles'][0]
+    client.post('/api/issues/open',json={'article_ids':[article['id']]})
+    with db.connect() as conn:assert conn.execute('SELECT open_count FROM articles WHERE id=?',(article['id'],)).fetchone()['open_count']==1
+    issues=client.get('/api/issues').json()
+    assert issues[0]['local_clicks']==1
+    assert issues[0]['priority_basis']=='복수 언론사 보도·최신성·프로그램 내 클릭'

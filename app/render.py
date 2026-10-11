@@ -73,6 +73,16 @@ def bold_font(size):
     return ImageFont.truetype(str(path), size) if path.is_file() else font(size)
 
 
+def fit_cover(text, draw):
+    text=' '.join(text.split())
+    for max_lines,largest,smallest in ((2,112,76),(3,88,48)):
+        for size in range(largest,smallest-1,-2):
+            face=bold_font(size)
+            lines=wrap(text,draw,face,930)
+            if len(lines)<=max_lines:return face,lines,int(size*1.38)
+    return fit(text,draw,930,600,46,24)
+
+
 def render_breaking(project, index):
     card = project['cards'][index]
     design = project.get('design', {})
@@ -92,18 +102,21 @@ def render_breaking(project, index):
     if cover:
         if design.get('badge_id'):
             with Image.open(image_path(design['badge_id'])) as banner:
-                thumb = ImageOps.contain(banner.convert('RGBA'), (450, 112))
-                image.paste(thumb, ((1080-thumb.width)//2, 252), thumb)
+                thumb = ImageOps.contain(banner.convert('RGBA'), (350, 88))
+                image.paste(thumb, ((1080-thumb.width)//2, 180), thumb)
         else:
-            draw.polygon([(398, 252), (708, 252), (685, 328), (375, 328)], fill=accent)
-            draw.polygon([(380, 252), (390, 252), (367, 328), (357, 328)], fill=accent)
-            draw.text((540, 284), '뉴스속보', anchor='mm', font=bold_font(44), fill='#ffffff')
+            draw.polygon([(428, 180), (673, 180), (654, 240), (409, 240)], fill=accent)
+            draw.polygon([(414, 180), (422, 180), (402, 240), (394, 240)], fill=accent)
+            draw.text((540, 208), '뉴스속보', anchor='mm', font=bold_font(36), fill='#ffffff')
     body = card['body'] or '원문을 확인하고 내용을 작성하세요.'
     if not cover:
         body = format_card_body(body)
     max_size = 112 if cover else 48
     paragraphs = [body] if cover else body.split('\n\n')
-    for size in range(max_size, 19 if not cover else 27, -2):
+    if cover:
+        face,lines,spacing=fit_cover(body,draw)
+        blocks=[lines];total_height=len(lines)*spacing;gap=0
+    for size in ([] if cover else range(max_size,19,-2)):
         face = bold_font(size) if cover else font(size)
         blocks = [wrap(paragraph, draw, face, 930 if cover else 880) for paragraph in paragraphs]
         spacing = int(size * (1.38 if cover else 1.65))
@@ -112,8 +125,8 @@ def render_breaking(project, index):
         if total_height <= (670 if cover else 800):
             break
     else:
-        raise ValueError('속보 카드 문구가 너무 깁니다. 문구를 줄여 주세요.')
-    y = 440 + max(0, (570 - total_height) / 2) if cover else 240
+        if not cover:raise ValueError('속보 카드 문구가 너무 깁니다. 문구를 줄여 주세요.')
+    y = 320 if cover else 240
     for lines in blocks:
         for line in lines:
             if cover:
@@ -132,11 +145,11 @@ def render_breaking(project, index):
     logo_id = design.get('logo_id')
     if logo_id:
         with Image.open(image_path(logo_id)) as logo:
-            thumb = ImageOps.contain(logo.convert('RGBA'), (340, 90))
+            thumb = ImageOps.contain(logo.convert('RGBA'), (300, 80))
             image.paste(thumb, ((1080 - thumb.width)//2, 1190), thumb)
     else:
         # Colored wordmark, separate from any news photograph.
-        face = bold_font(64)
+        face = bold_font(58)
         name = '미디어로그'
         mask = Image.new('L', image.size)
         ImageDraw.Draw(mask).text((540, 1190), name, anchor='mt', font=face, fill=255)

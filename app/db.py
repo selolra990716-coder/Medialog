@@ -55,6 +55,9 @@ def init_db():
         ''')
 
         columns = {row['name'] for row in conn.execute('PRAGMA table_info(articles)')}
-        for column in ('image_url', 'image_id'):
+        for column in ('image_url', 'image_id', 'article_text'):
             if column not in columns:
                 conn.execute(f'ALTER TABLE articles ADD COLUMN {column} TEXT')
+
+        if 'open_count' not in columns:
+            conn.execute('ALTER TABLE articles ADD COLUMN open_count INTEGER NOT NULL DEFAULT 0')

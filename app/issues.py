@@ -1,4 +1,5 @@
 import re
+import math
 from .headlines import summarize_title, format_card_body
 from datetime import datetime, timezone
 
@@ -9,9 +10,14 @@ def tokens(title):
     return {w for w in re.findall(r'[가-힣A-Za-z0-9]{2,}', title.lower()) if w not in STOPWORDS}
 
 
+def noteworthy(title):
+    return not re.search(r'^\s*\[(?:부고|인사|게시판|오늘의\s*일정|[^\]]*(?:중간순위|전적))\]', title)
+
+
 def group_issues(articles):
     groups = []
     for article in articles:
+        if not noteworthy(article['title']):continue
         words = tokens(article['title'])
         match = None
         for group in groups:
@@ -31,7 +37,9 @@ def group_issues(articles):
         group['publisher_count'] = len({a['publisher'] for a in group['articles']})
         newest = max(datetime.fromisoformat(a['published_at']) for a in group['articles'])
         age = max(0, (now - newest).total_seconds() / 3600)
-        group['score'] = round(group['publisher_count'] * 10 + min(len(group['articles']), 10) * 2 + max(0, 24 - age), 1)
+        group['local_clicks']=sum(int(a.get('open_count') or 0) for a in group['articles'])
+        group['priority_basis']='복수 언론사 보도·최신성·프로그램 내 클릭'
+        group['score'] = round(min(20,math.log1p(group['local_clicks'])*4) + group['publisher_count'] * 10 + min(len(group['articles']), 10) * 2 + max(0, 24 - age), 1)
         excerpts = collect_excerpts(group['articles'])
         selected = []
         for excerpt in excerpts:
