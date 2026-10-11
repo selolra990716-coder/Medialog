@@ -36,6 +36,8 @@ def save_config(key, enabled, research_enabled=False):
 
 async def generate_image(title, card, key):
     prompt = ('Create an editorial background illustration for a Korean news card, portrait composition. '
+              'Compose for a 4:5 news card with all important subjects fully inside the frame. '
+              'Keep heads and faces away from edges; never crop people. '
               'No text, letters, logos or watermarks. Leave unobtrusive space for text. '
               'This is a conceptual illustration, not documentary evidence. '
               'Do not depict identifiable real people or fabricate a specific accident scene. '

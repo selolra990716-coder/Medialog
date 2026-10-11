@@ -683,3 +683,20 @@ def test_priority_feed_is_limited_filters_minor_items_and_counts_local_clicks(cl
     issues=client.get('/api/issues').json()
     assert issues[0]['local_clicks']==1
     assert issues[0]['priority_basis']=='복수 언론사 보도·최신성·프로그램 내 클릭'
+
+
+def test_background_preserves_both_edges_of_landscape_and_portrait_photos():
+    from app.render import full_photo_background
+    for size in ((1200, 600), (600, 1200), (1080, 1350)):
+        source = Image.new('RGB', size, '#202020')
+        from PIL import ImageDraw, ImageOps
+        draw = ImageDraw.Draw(source)
+        draw.rectangle((0, 0, 49, size[1]-1), fill='#ff0000')
+        draw.rectangle((size[0]-50, 0, size[0]-1, size[1]-1), fill='#00ff00')
+        result = full_photo_background(source, (1080, 1350))
+        fitted = ImageOps.contain(source, (1080, 1350))
+        x = (1080-fitted.width)//2
+        y = (1350-fitted.height)//2
+        assert result.size == (1080, 1350)
+        assert result.getpixel((x+5, y+fitted.height//2)) == (255, 0, 0)
+        assert result.getpixel((x+fitted.width-6, y+fitted.height//2)) == (0, 255, 0)

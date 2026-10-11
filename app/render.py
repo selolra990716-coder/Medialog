@@ -3,7 +3,7 @@ import os
 import re
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageFilter
 from .assets import image_path
 from .headlines import format_card_body
 
@@ -92,6 +92,16 @@ def centered_title_origin(draw, text, face, top):
     return (1080 - (right - left)) / 2 - left, top - upper
 
 
+def full_photo_background(source, size):
+    """Preserve the complete photo; use a blurred backdrop for ratio differences."""
+    photo = ImageOps.exif_transpose(source).convert('RGB')
+    backdrop = ImageOps.fit(photo, size).filter(ImageFilter.GaussianBlur(36))
+    complete = ImageOps.contain(photo, size)
+    backdrop.paste(complete, ((size[0] - complete.width) // 2,
+                              (size[1] - complete.height) // 2))
+    return backdrop
+
+
 def render_breaking(project, index):
     card = project['cards'][index]
     design = project.get('design', {})
@@ -104,7 +114,7 @@ def render_breaking(project, index):
         if not path.is_file():
             raise ValueError('배경 사진 파일을 찾을 수 없습니다. 자산 보관함을 확인하세요.')
         with Image.open(path) as source:
-            image = ImageOps.fit(source.convert('RGB'), image.size)
+            image = full_photo_background(source, image.size)
         image = Image.blend(image, Image.new('RGB', image.size, '#000000'), .62)
     draw = ImageDraw.Draw(image)
     cover = card.get('role') == 'cover' or index == 0
