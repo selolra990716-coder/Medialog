@@ -700,3 +700,22 @@ def test_background_preserves_both_edges_of_landscape_and_portrait_photos():
         assert result.size == (1080, 1350)
         assert result.getpixel((x+5, y+fitted.height//2)) == (255, 0, 0)
         assert result.getpixel((x+fitted.width-6, y+fitted.height//2)) == (0, 255, 0)
+
+
+def test_editor_typography_persists_and_changes_actual_png(client, monkeypatch):
+    aid=seeded_article(client,monkeypatch)
+    project=client.post('/api/projects',json={'article_ids':[aid]}).json()
+    project['design']['layout']='breaking'
+    project['cards'][0].update(body='짧은 제목',font_size=60,font_style='regular',text_align='left',text_top=400,line_height=1.5)
+    response=client.put(f"/api/projects/{project['id']}",json=project)
+    assert response.status_code==200
+    saved=client.get(f"/api/projects/{project['id']}").json()
+    assert saved['cards'][0]['font_size']==60
+    assert saved['cards'][0]['text_align']=='left'
+    png=client.get(f"/api/projects/{project['id']}/cards/0.png")
+    assert png.status_code==200
+    image=Image.open(io.BytesIO(png.content)).convert('RGB')
+    assert any(r>240 and g>240 and b>240 for r,g,b in image.crop((100,400,380,470)).getdata())
+    assert not any(r>240 and g>240 and b>240 for r,g,b in image.crop((700,400,980,470)).getdata())
+    project['cards'][0]['font_size']=200
+    assert client.put(f"/api/projects/{project['id']}",json=project).status_code==422

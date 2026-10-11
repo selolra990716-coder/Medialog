@@ -121,8 +121,8 @@ def render_breaking(project, index):
     if cover:
         if design.get('badge_id'):
             with Image.open(image_path(design['badge_id'])) as banner:
-                thumb = ImageOps.contain(banner.convert('RGBA'), (350, 88))
-                image.paste(thumb, ((1080-thumb.width)//2, 180), thumb)
+                thumb = ImageOps.contain(banner.convert('RGBA'), (design.get('badge_width',350), 200))
+                image.paste(thumb, ((1080-thumb.width)//2, design.get('badge_top',180)), thumb)
         else:
             draw.polygon([(428, 180), (673, 180), (654, 240), (409, 240)], fill=accent)
             draw.polygon([(414, 180), (422, 180), (402, 240), (394, 240)], fill=accent)
@@ -145,15 +145,31 @@ def render_breaking(project, index):
             break
     else:
         if not cover:raise ValueError('속보 카드 문구가 너무 깁니다. 문구를 줄여 주세요.')
-    y = 320 if cover else 240
+    if card.get('font_size'):
+        size = card['font_size']
+        face = bold_font(size) if card.get('font_style', 'bold') == 'bold' else font(size)
+        blocks = [wrap(paragraph, draw, face, 930 if cover else 880) for paragraph in paragraphs]
+        spacing = int(size * (card.get('line_height') or (1.38 if cover else 1.65)))
+    elif card.get('font_style') == 'regular' and cover:
+        face = font(face.size)
+        blocks = [wrap(body, draw, face, 930)]
+    if card.get('line_height'):
+        spacing = int(face.size * card['line_height'])
+    y = card.get('text_top') if card.get('text_top') is not None else (320 if cover else 240)
+    if y + sum(len(lines)*spacing for lines in blocks) + gap*(len(blocks)-1) > 1080:
+        raise ValueError('텍스트가 로고 영역을 넘습니다. 크기·위치·문구를 조정하세요.')
     for lines in blocks:
         for line in lines:
+            alignment = card.get('text_align') or ('center' if cover else 'left')
+            left, upper, right, _ = draw.textbbox((0, 0), line, font=face)
+            x = ((1080 - (right-left))/2-left if alignment == 'center' else
+                 (980-right if alignment == 'right' else 100-left))
             if cover:
-                x, baseline = centered_title_origin(draw, line, face, y)
+                baseline = y-upper
                 draw.text((x + 3, baseline + 5), line, font=face, fill='#000000', stroke_width=3)
                 draw.text((x, baseline), line, font=face, fill=ink)
             else:
-                draw.text((100, y), line, font=face, fill=ink)
+                draw.text((x, y-upper), line, font=face, fill=ink)
             y += spacing
         y += gap
     if cover:
@@ -165,8 +181,8 @@ def render_breaking(project, index):
     logo_id = design.get('logo_id')
     if logo_id:
         with Image.open(image_path(logo_id)) as logo:
-            thumb = ImageOps.contain(logo.convert('RGBA'), (300, 80))
-            image.paste(thumb, ((1080 - thumb.width)//2, 1190), thumb)
+            thumb = ImageOps.contain(logo.convert('RGBA'), (design.get('logo_width',300), 150))
+            image.paste(thumb, ((1080 - thumb.width)//2, design.get('logo_top',1190)), thumb)
     else:
         # Colored wordmark, separate from any news photograph.
         face = bold_font(58)

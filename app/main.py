@@ -1,3 +1,4 @@
+from typing import Literal
 import asyncio
 import io
 import json
@@ -129,6 +130,12 @@ class Source(BaseModel):
 
 
 class Card(BaseModel):
+    font_style: Literal['bold', 'regular'] = 'bold'
+    font_size: int | None = Field(default=None, ge=20, le=150)
+    text_align: Literal['center', 'left', 'right'] | None = None
+    text_top: int | None = Field(default=None, ge=80, le=950)
+    line_height: float | None = Field(default=None, ge=1.1, le=2.2)
+
     heading: str = Field(min_length=1, max_length=100)
     body: str = Field(max_length=500)
     source_ids: list[int] = Field(max_length=20)
