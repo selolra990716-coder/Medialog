@@ -75,12 +75,21 @@ def bold_font(size):
 
 def fit_cover(text, draw):
     text=' '.join(text.split())
-    for max_lines,largest,smallest in ((2,112,76),(3,88,48)):
-        for size in range(largest,smallest-1,-2):
-            face=bold_font(size)
-            lines=wrap(text,draw,face,930)
-            if len(lines)<=max_lines:return face,lines,int(size*1.38)
-    return fit(text,draw,930,600,46,24)
+    face = bold_font(112)
+    lines = wrap(text, draw, face, 930)
+    if len(lines) <= 2:
+        return face, lines, int(112 * 1.38)
+    for size in range(100, 87, -2):
+        face = bold_font(size)
+        lines = wrap(text, draw, face, 930)
+        if len(lines) <= 3:
+            return face, lines, int(size * 1.38)
+    raise ValueError('표지 제목은 세 줄 이내로 짧게 작성해 주세요.')
+
+
+def centered_title_origin(draw, text, face, top):
+    left, upper, right, _ = draw.textbbox((0, 0), text, font=face)
+    return (1080 - (right - left)) / 2 - left, top - upper
 
 
 def render_breaking(project, index):
@@ -130,8 +139,9 @@ def render_breaking(project, index):
     for lines in blocks:
         for line in lines:
             if cover:
-                draw.text((543, y + 5), line, anchor='mt', font=face, fill='#000000', stroke_width=3)
-                draw.text((540, y), line, anchor='mt', font=face, fill=ink)
+                x, baseline = centered_title_origin(draw, line, face, y)
+                draw.text((x + 3, baseline + 5), line, font=face, fill='#000000', stroke_width=3)
+                draw.text((x, baseline), line, font=face, fill=ink)
             else:
                 draw.text((100, y), line, font=face, fill=ink)
             y += spacing

@@ -650,11 +650,19 @@ def test_cover_uses_two_lines_or_smaller_three_line_text():
     draw=ImageDraw.Draw(Image.new('RGB',(1080,1350)))
     face,lines,spacing=fit_cover('삼성, 소노 꺾고 개막 3연승',draw)
     assert len(lines)==2
+    assert face.size==112
     assert all(draw.textlength(line,font=face)<=930 for line in lines)
     assert summarize_title('삼성, 소노에 82-81 역전승 개막 3연승')=='삼성, 소노에 개막 3연승'
     face,lines,spacing=fit_cover('지역 교통 개선을 위한 새로운 노선 확대와 주민 의견 수렴 계획 발표',draw)
     assert len(lines)<=3
-    if len(lines)==3:assert face.size<=88
+    assert len(lines)==3
+    assert 88<=face.size<=100
+    from app.render import centered_title_origin
+    for line in lines:
+        x,y=centered_title_origin(draw,line,face,320)
+        left,top,right,bottom=draw.textbbox((x,y),line,font=face)
+        assert abs((left+right)/2-540)<=0.5
+        assert top==320
 
 
 def test_priority_feed_is_limited_filters_minor_items_and_counts_local_clicks(client,monkeypatch):
