@@ -1,4 +1,5 @@
 import re
+from .headlines import summarize_title, format_card_body
 from datetime import datetime, timezone
 
 STOPWORDS = {'기자', '뉴스', '속보', '단독', '종합', '오늘', '이번', '대한', '위한', 'the', 'and', 'for', 'with', 'from', 'that', 'this', 'says'}
@@ -48,6 +49,10 @@ def draft_project(articles, outline=None, design=None):
     from .design import default_outline, Design
     outline = outline or [row.model_dump() for row in default_outline()]
     design = design or Design().model_dump()
+    design = {**design, 'image_ids': list(design.get('image_ids', []))}
+    for article in articles:
+        if article.get('image_id') and article['image_id'] not in design['image_ids'] and len(design['image_ids']) < 10:
+            design['image_ids'].append(article['image_id'])
     primary = articles[0]
     sources = [{'article_id': a['id'], 'publisher': a['publisher'], 'title': a['title'], 'url': a['url']} for a in articles]
     excerpts = collect_excerpts(articles)
@@ -56,18 +61,30 @@ def draft_project(articles, outline=None, design=None):
     for item in outline:
         role = item['role']
         if role == 'cover':
-            body, source_ids = primary['title'][:450], [primary['id']]
+            body, source_ids = summarize_title(primary['title']), [primary['id']]
         elif role == 'sources':
             body = '\n'.join(dict.fromkeys(a['publisher'] for a in articles))[:450]
             source_ids = [a['id'] for a in articles]
+        elif role == 'impact':
+            body, source_ids = impact_excerpt(articles)
         elif role != 'custom' and excerpt_index < len(excerpts):
-            body, source_id = excerpts[excerpt_index]
-            source_ids = [source_id]
-            excerpt_index += 1
+            selected = []
+            for text, source_id in excerpts[excerpt_index:]:
+                if len('\n\n'.join([entry[0] for entry in selected] + [text])) > 500:
+                    break
+                selected.append((text, source_id))
+                if len(selected) == (3 if len(outline) == 3 else 1):
+                    break
+            body = '\n\n'.join(text for text, _ in selected)
+            source_ids = list(dict.fromkeys(source_id for _, source_id in selected))
+            excerpt_index += len(selected)
         else:
             body, source_ids = '', []
-        cards.append({'role': role, 'heading': item['heading'], 'body': body, 'source_ids': source_ids,
-                      'layout': None, 'image_id': design['image_ids'][0] if design['image_ids'] and design.get('layout') not in ('breaking', 'poster') else None})
+        photo = next((a.get('image_id') for a in articles if a['id'] in source_ids and a.get('image_id')), None)
+        if not photo:
+            photo = next((a.get('image_id') for a in articles if a.get('image_id')), None)
+        cards.append({'role': role, 'heading': item['heading'], 'body': format_card_body(body) if role not in ('cover', 'sources', 'custom') else body, 'source_ids': source_ids,
+                      'layout': None, 'image_id': photo or (design['image_ids'][0] if design['image_ids'] and design.get('layout') not in ('breaking', 'poster') else None)})
     caption = primary['title'] + '\n\n'
     for source in sources:
         entry = f"출처: {source['publisher']}\n{source['url']}\n"
@@ -85,7 +102,7 @@ def collect_excerpts(articles):
     by_article = []
     for article in articles:
         candidates = []
-        for sentence in re.split(r'(?<=[.!?。])\s+|(?<=다\.)\s*', article['summary']):
+        for sentence in re.split(r'(?<=[.!?。])\s+|(?<=다\.)\s*', format_card_body(article['summary'])):
             sentence = re.sub(r'\s+', ' ', sentence).strip()
             if len(sentence) < 20 or re.search(r'무단\s*(전재|복제)|재배포\s*금지|All rights reserved|Copyright', sentence, re.I):
                 continue
@@ -101,3 +118,18 @@ def collect_excerpts(articles):
             if index < len(rows):
                 collected.append(rows[index])
     return collected
+
+
+def impact_excerpt(articles):
+    pattern = r'전망|예정|계획|영향|기대|우려|향후|앞으로|다음\s*(?:주|달|경기)|가능성|전환점|부담|과제|\b(?:plan|plans|planned|forecast|outlook|expected|impact)\b'
+    candidates = [(text, article_id) for text, article_id in collect_excerpts(articles)
+                  if re.search(pattern, text, re.I)]
+    if candidates:
+        selected = []
+        for text, article_id in candidates:
+            if len('\n\n'.join([entry[0] for entry in selected] + [text])) <= 500:
+                selected.append((text,article_id))
+            if len(selected) == 3:
+                break
+        return '\n\n'.join(format_card_body(text) for text, _ in selected), list(dict.fromkeys(id for _, id in selected))
+    return '', []

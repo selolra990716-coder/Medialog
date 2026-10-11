@@ -5,6 +5,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 from .assets import image_path
+from .headlines import format_card_body
 
 FONT_CANDIDATES = [
     str(Path(__file__).resolve().parent.parent / 'fonts' / 'NotoSansCJK-Regular.ttc'),
@@ -38,11 +39,19 @@ def wrap(text, draw, face, width):
     lines = []
     for paragraph in text.split('\n'):
         line = ''
-        for char in paragraph:
-            if line and draw.textlength(line + char, font=face) > width:
-                lines.append(line.rstrip())
-                line = char.lstrip()
-            else:
+        for word in paragraph.split():
+            candidate = f'{line} {word}' if line else word
+            if draw.textlength(candidate, font=face) <= width:
+                line = candidate
+                continue
+            if line:
+                lines.append(line)
+                line = ''
+            # Split only a single word wider than the entire card.
+            for char in word:
+                if line and draw.textlength(line + char, font=face) > width:
+                    lines.append(line)
+                    line = ''
                 line += char
         lines.append(line)
     return lines
@@ -79,35 +88,47 @@ def render_breaking(project, index):
             image = ImageOps.fit(source.convert('RGB'), image.size)
         image = Image.blend(image, Image.new('RGB', image.size, '#000000'), .62)
     draw = ImageDraw.Draw(image)
-    # Slanted red badge and large white headline follow the supplied reference.
-    draw.polygon([(398, 252), (708, 252), (685, 328), (375, 328)], fill=accent)
-    draw.polygon([(380, 252), (390, 252), (367, 328), (357, 328)], fill=accent)
-    badge = '뉴스속보' if card.get('role') == 'cover' or index == 0 else card['heading']
-    badge_face = bold_font(44)
-    if draw.textlength(badge, font=badge_face) > 270:
-        badge = f'{index + 1:02d} / 핵심 내용'
-        badge_face = bold_font(30)
-    draw.text((540, 284), badge, anchor='mm', font=badge_face, fill='#ffffff')
+    cover = card.get('role') == 'cover' or index == 0
+    if cover:
+        if design.get('badge_id'):
+            with Image.open(image_path(design['badge_id'])) as banner:
+                thumb = ImageOps.contain(banner.convert('RGBA'), (450, 112))
+                image.paste(thumb, ((1080-thumb.width)//2, 252), thumb)
+        else:
+            draw.polygon([(398, 252), (708, 252), (685, 328), (375, 328)], fill=accent)
+            draw.polygon([(380, 252), (390, 252), (367, 328), (357, 328)], fill=accent)
+            draw.text((540, 284), '뉴스속보', anchor='mm', font=bold_font(44), fill='#ffffff')
     body = card['body'] or '원문을 확인하고 내용을 작성하세요.'
-    max_size = 112 if card.get('role') == 'cover' or index == 0 else 76
-    for size in range(max_size, 27, -2):
-        face = bold_font(size)
-        lines = wrap(body, draw, face, 930)
-        spacing = int(size * 1.38)
-        if len(lines) * spacing <= 670:
+    if not cover:
+        body = format_card_body(body)
+    max_size = 112 if cover else 48
+    paragraphs = [body] if cover else body.split('\n\n')
+    for size in range(max_size, 19 if not cover else 27, -2):
+        face = bold_font(size) if cover else font(size)
+        blocks = [wrap(paragraph, draw, face, 930 if cover else 880) for paragraph in paragraphs]
+        spacing = int(size * (1.38 if cover else 1.65))
+        gap = 0 if cover else int(size * .65)
+        total_height = sum(len(lines) * spacing for lines in blocks) + gap * (len(blocks)-1)
+        if total_height <= (670 if cover else 800):
             break
     else:
         raise ValueError('속보 카드 문구가 너무 깁니다. 문구를 줄여 주세요.')
-    y = 440 + max(0, (570 - len(lines) * spacing) / 2)
-    for line in lines:
-        draw.text((543, y + 5), line, anchor='mt', font=face, fill='#000000', stroke_width=3)
-        draw.text((540, y), line, anchor='mt', font=face, fill=ink)
-        y += spacing
-    publishers = list(dict.fromkeys(source['publisher'] for source in project['sources'] if source['article_id'] in card['source_ids']))
-    footer = '출처: ' + ', '.join(publishers) if publishers else '직접 작성 · 출처 확인 필요'
-    face, lines, spacing = fit(footer[:130], draw, 920, 80, 22, 18)
-    for number, line in enumerate(lines):
-        draw.text((540, 1110 + number * spacing), line, anchor='mt', font=face, fill=ink)
+    y = 440 + max(0, (570 - total_height) / 2) if cover else 240
+    for lines in blocks:
+        for line in lines:
+            if cover:
+                draw.text((543, y + 5), line, anchor='mt', font=face, fill='#000000', stroke_width=3)
+                draw.text((540, y), line, anchor='mt', font=face, fill=ink)
+            else:
+                draw.text((100, y), line, font=face, fill=ink)
+            y += spacing
+        y += gap
+    if cover:
+        publishers = list(dict.fromkeys(source['publisher'] for source in project['sources'] if source['article_id'] in card['source_ids']))
+        footer = '출처: ' + ', '.join(publishers) if publishers else '직접 작성 · 출처 확인 필요'
+        face, lines, spacing = fit(footer[:130], draw, 920, 80, 22, 18)
+        for number, line in enumerate(lines):
+            draw.text((540, 1110 + number * spacing), line, anchor='mt', font=face, fill=ink)
     logo_id = design.get('logo_id')
     if logo_id:
         with Image.open(image_path(logo_id)) as logo:
@@ -125,6 +146,8 @@ def render_breaking(project, index):
             amount = max(0, min(1, (x - 360) / 360))
             gradient_draw.line((x, 1190, x, 1280), fill=(int(15 + 215*amount), int(75*(1-amount)), int(235*(1-amount)+35*amount)))
         image.paste(gradient, (0, 0), mask)
+    if card.get('ai_background'):
+        draw.text((1008, 58), 'AI 생성 이미지', anchor='rt', font=font(20), fill=ink)
     draw.text((980, 1300), f'{index+1:02d}', anchor='rt', font=font(20), fill=ink)
     if not project['reviewed']:
         draw.text((70, 1300), '검토 전 초안', font=font(20), fill=ink)

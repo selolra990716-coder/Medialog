@@ -53,3 +53,8 @@ def init_db():
             project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE
         );
         ''')
+
+        columns = {row['name'] for row in conn.execute('PRAGMA table_info(articles)')}
+        for column in ('image_url', 'image_id'):
+            if column not in columns:
+                conn.execute(f'ALTER TABLE articles ADD COLUMN {column} TEXT')

@@ -455,3 +455,149 @@ def test_default_publisher_collection_creates_breaking_draft(client, monkeypatch
     assert len(draft['cards']) == 3
     assert client.get(f"/api/projects/{draft['id']}/cards/0.png").status_code == 200
     assert client.post('/api/issues/open', json={'article_ids':[a['id'] for a in issues[0]['articles']]}).json()['id'] == draft['id']
+
+
+def test_cover_title_shortening_and_word_wrap():
+    from app.headlines import summarize_title
+    from app.render import wrap, bold_font
+    from PIL import ImageDraw
+    assert summarize_title('‘상식’이 먹히는 삼성…23년 만에 프로농구 개막 3연승 행진') == '삼성, 23년 만에 프로농구 개막 3연승'
+    assert summarize_title('[속보] 대구 북구 마트 천장 무너져 수십명 부상(종합)') == '대구 북구 마트 천장 무너져 수십명 부상'
+    assert summarize_title('경찰, 사고 원인 조사…붕괴 가능성 배제 못해') == '경찰, 사고 원인 조사 · 붕괴 가능성 배제 못해'
+    long = '당국은 새로운 정책에 대해 추가적인 검토와 관련 절차를 거쳐 적용 여부를 결정할 예정이라고 밝혔다'
+    assert len(summarize_title(long)) <= 48
+    assert summarize_title(long).endswith('…')
+    draw = ImageDraw.Draw(Image.new('RGB',(1080,1350)))
+    lines = wrap('삼성, 23년 만에 프로농구 개막 3연승',draw,bold_font(112),930)
+    assert ' '.join(lines) == '삼성, 23년 만에 프로농구 개막 3연승'
+    assert all(draw.textlength(line,font=bold_font(112)) <= 930 for line in lines)
+
+
+def test_existing_cover_can_be_shortened_without_changing_other_cards(client):
+    from app import rss
+    from app.issues import draft_project
+    import json
+    title = '‘상식’이 먹히는 삼성…23년 만에 프로농구 개막 3연승 행진'
+    articles = [{'id':1,'publisher':'테스트','title':title,'url':'https://example.com/story','summary':'원문에서 확인한 핵심 내용입니다. 이 내용은 테스트용으로 작성한 문장입니다.'}]
+    draft = draft_project(articles)
+    assert draft['cards'][0]['body'] == '삼성, 23년 만에 프로농구 개막 3연승'
+    draft['cards'][0]['body'] = title
+    draft['cards'][1]['body'] = '내가 편집한 본문'
+    with db.connect() as conn:
+        cursor = conn.execute('INSERT INTO projects(title,payload,created_at,updated_at) VALUES(?,?,?,?)',(title,json.dumps(draft),rss.utcnow(),rss.utcnow()))
+        project_id = cursor.lastrowid
+    result = client.post(f'/api/projects/{project_id}/summarize-cover')
+    assert result.status_code == 200
+    project = result.json()
+    assert project['cards'][0]['body'] == '삼성, 23년 만에 프로농구 개막 3연승'
+    assert project['cards'][1]['body'] == '내가 편집한 본문'
+    assert project['sources'][0]['title'] == title
+    assert project['caption'] == draft['caption']
+    assert not project['reviewed']
+
+
+def test_byline_cleanup_paragraphs_and_impact_selection():
+    from app.headlines import format_card_body
+    from app.issues import impact_excerpt
+    from app.presets import breaking_template
+    body = '(서울=연합뉴스) 오명언 기자 = 삼성은 개막 3연승을 거뒀다. 다음 경기에서는 연승을 이어갈 계획이다.'
+    assert format_card_body(body) == '삼성은 개막 3연승을 거뒀다.\n\n다음 경기에서는 연승을 이어갈 계획이다.'
+    assert format_card_body('김철수 기자는 향후 계획을 설명했다.') == '김철수 기자는 향후 계획을 설명했다.'
+    text, ids = impact_excerpt([{'id':7,'summary':body}])
+    assert text == '다음 경기에서는 연승을 이어갈 계획이다.'
+    assert ids == [7]
+    assert impact_excerpt([{'id':8,'summary':'삼성은 마지막 경기에서 승리를 거뒀다고 구단이 밝혔습니다.'}]) == ('',[])
+    assert breaking_template().outline[2].role == 'impact'
+    assert breaking_template().outline[2].heading == '영향과 전망'
+
+
+def test_body_and_impact_actions_preserve_sources(client):
+    from app.issues import draft_project
+    from app.presets import breaking_template
+    import json
+    title='삼성, 프로농구 개막 3연승'
+    summary='(서울=연합뉴스) 오명언 기자 = 삼성은 새 시즌 개막 3연승을 거뒀다고 밝혔다. 향후 경기에서도 연승을 이어갈 계획이라고 구단은 밝혔다.'
+    with db.connect() as conn:
+        article_id=conn.execute('INSERT INTO articles(publisher,title,url,summary,published_at,collected_at) VALUES(?,?,?,?,?,?)',('테스트',title,'https://example.com/impact',summary,rss.utcnow(),rss.utcnow())).lastrowid
+        article=dict(conn.execute('SELECT * FROM articles WHERE id=?',(article_id,)).fetchone())
+        template=breaking_template()
+        draft=draft_project([article],[o.model_dump() for o in template.outline],template.design.model_dump())
+        draft['cards'][1]['body']=summary
+        draft['cards'][2].update(role='background',heading='배경과 맥락',body='이전 본문')
+        project_id=conn.execute('INSERT INTO projects(title,payload,created_at,updated_at) VALUES(?,?,?,?)',(title,json.dumps(draft),rss.utcnow(),rss.utcnow())).lastrowid
+    formatted=client.post(f'/api/projects/{project_id}/format-body').json()
+    assert '기자 =' not in formatted['cards'][1]['body']
+    assert '\n\n' in formatted['cards'][1]['body']
+    result=client.post(f'/api/projects/{project_id}/impact-card').json()
+    assert result['cards'][2]['role']=='impact'
+    assert result['cards'][2]['heading']=='영향과 전망'
+    assert '계획' in result['cards'][2]['body']
+    assert result['sources']==draft['sources']
+    assert result['caption']==draft['caption']
+    assert client.get(f'/api/projects/{project_id}/cards/1.png').status_code==200
+    assert client.get(f'/api/projects/{project_id}/cards/2.png').status_code==200
+
+
+def test_ai_config_and_three_backgrounds(client,monkeypatch):
+    import asyncio
+    from app import ai_images
+    monkeypatch.delenv('OPENAI_API_KEY',raising=False)
+    assert client.put('/api/ai/settings',json={'enabled':True}).status_code==422
+    result=client.put('/api/ai/settings',json={'key':'test-private-key','enabled':False})
+    assert result.json()=={'configured':True,'enabled':False}
+    assert 'test-private-key' not in client.get('/api/ai/settings').text
+    aid=seeded_article(client,monkeypatch)
+    from app.presets import breaking_template
+    template=breaking_template()
+    project=client.post('/api/projects',json={'article_ids':[aid],'design':template.design.model_dump(),'outline':[row.model_dump() for row in template.outline]}).json()
+    calls=[]
+    async def fake(title,card,key):
+        calls.append((title,card['heading']))
+        return image_bytes()
+    monkeypatch.setattr(ai_images,'generate_image',fake)
+    ai_images.jobs[project['id']]={'status':'running','completed':0,'error':None}
+    assert client.put(f"/api/projects/{project['id']}",json=project).status_code==409
+    asyncio.run(ai_images.run(project['id'],'test-private-key'))
+    result=client.get(f"/api/projects/{project['id']}").json()
+    assert len(calls)==3
+    assert len(set(card['image_id'] for card in result['cards']))==3
+    assert all(card['ai_background'] for card in result['cards'])
+    assert client.get(f"/api/projects/{project['id']}/ai-backgrounds").json()['completed']==3
+    rendered=Image.open(io.BytesIO(client.get(f"/api/projects/{project['id']}/cards/1.png").content))
+    # Label lives at the upper right, and the old source footer is absent.
+    assert rendered.crop((800,58,1008,105)).getbbox()
+    assert len(set(rendered.crop((150,1120,930,1150)).getdata()))==1
+    ai_images.jobs.clear()
+
+
+def test_rss_image_discovery_and_failed_ai_does_not_corrupt_project(client,monkeypatch):
+    from app import ai_images
+    import asyncio
+    data=b'<rss xmlns:media="http://search.yahoo.com/mrss/"><channel><item><title>News</title><link>https://example.com/news</link><media:thumbnail url="https://example.com/photo.jpg"/></item></channel></rss>'
+    assert rss.parse_feed(data,'https://example.com/rss')[0]['image_url']=='https://example.com/photo.jpg'
+    aid=seeded_article(client,monkeypatch)
+    project=client.post('/api/projects',json={'article_ids':[aid]}).json()
+    async def fail(*args):
+        raise ValueError('이미지 생성 권한을 확인하세요.')
+    monkeypatch.setattr(ai_images,'generate_image',fail)
+    ai_images.jobs[project['id']]={'status':'running','completed':0,'error':None}
+    asyncio.run(ai_images.run(project['id'],'fake'))
+    assert ai_images.jobs[project['id']]['status']=='error'
+    assert client.get(f"/api/projects/{project['id']}").json()['cards']==project['cards']
+    ai_images.jobs.clear()
+
+
+def test_custom_banner_is_kept_on_cover_only(client):
+    from app.presets import breaking_template
+    template=breaking_template()
+    banner=client.post('/api/assets?name=news-banner.png',content=image_bytes()).json()
+    template.design.badge_id=banner['id']
+    assert client.put('/api/settings',json=template.model_dump()).status_code==200
+    assert client.delete(f"/api/assets/{banner['id']}").status_code==409
+    draft={'accent':template.design.accent,'design':template.design.model_dump(),'reviewed':False,'sources':[],
+           'cards':[{'role':'cover','heading':'표지','body':'짧은 뉴스 제목','source_ids':[]},
+                    {'role':'facts','heading':'핵심 내용','body':'첫 번째 문단입니다.\n\n다음 문단에서 자세히 설명합니다.','source_ids':[]}]}
+    cover=Image.open(io.BytesIO(render_card(draft,0)))
+    content=Image.open(io.BytesIO(render_card(draft,1)))
+    assert cover.getpixel((550,280))[0]>200
+    assert content.getpixel((550,280))==(25,27,29)

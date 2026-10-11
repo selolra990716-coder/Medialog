@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
-from . import db, rss, assets
+from . import db, rss, assets, ai_images
 from .design import Design, Outline, Layout, Role, default_outline, TemplateSettings
 from .issues import draft_project, group_issues
 from .render import render_card
@@ -41,6 +41,8 @@ async def collect_all():
                                 (feed_id,publisher,title,url,summary,published_at,collected_at) VALUES (?,?,?,?,?,?,?)''',
                                 (feed['id'], feed['name'], item['title'], item['url'], item['summary'], item['published_at'], rss.utcnow()))
                             added += cursor.rowcount
+                            if item.get('image_url'):
+                                conn.execute('UPDATE articles SET image_url=? WHERE url=?', (item['image_url'],item['url']))
                         conn.execute('UPDATE feeds SET last_checked=?,last_error=NULL WHERE id=?', (rss.utcnow(), feed['id']))
                     return {'feed_id': feed['id'], 'name': feed['name'], 'added': added, 'error': None}
                 except Exception as exc:
@@ -128,6 +130,7 @@ class Card(BaseModel):
     body: str = Field(max_length=500)
     source_ids: list[int] = Field(max_length=20)
     role: Role = 'facts'
+    ai_background: bool = False
     layout: Layout | None = None
     image_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')
 
@@ -166,6 +169,7 @@ def read_project(project_id):
     if 'design' not in payload:
         payload['design'] = Design(accent=payload['accent']).model_dump()
     for index, card in enumerate(payload['cards']):
+        card.setdefault('ai_background', False)
         card.setdefault('role', 'cover' if index == 0 else 'sources' if index == len(payload['cards']) - 1 else 'facts')
         card.setdefault('layout', None)
         card.setdefault('image_id', None)
@@ -243,6 +247,21 @@ def issues(q: str = '', days: int = 7):
     return group_issues(articles)
 
 
+async def prepare_article_images(ids):
+    with db.connect() as conn:
+        rows = [dict(row) for row in conn.execute('SELECT id,title,image_url,image_id FROM articles') if row['id'] in ids]
+    for row in rows[:3]:
+        if not row['image_url'] or row['image_id']:
+            continue
+        try:
+            content = await rss.fetch_image(row['image_url'])
+            asset = await asyncio.to_thread(assets.store, content, row['title'][:100] + '.jpg')
+            with db.connect() as conn:
+                conn.execute('UPDATE articles SET image_id=? WHERE id=?', (asset['id'],row['id']))
+        except (ValueError, OSError, httpx.HTTPError):
+            log.warning('Article image unavailable for article %s', row['id'])
+
+
 def store_draft(conn, payload):
     ids = list(dict.fromkeys(payload.article_ids))
     rows = conn.execute(f"SELECT * FROM articles WHERE id IN ({','.join('?' for _ in ids)})", ids).fetchall()
@@ -259,9 +278,13 @@ def store_draft(conn, payload):
 
 
 @app.post('/api/projects', status_code=201)
-def create_project(payload: DraftInput):
+async def create_project(payload: DraftInput):
+    if not ai_images.config()['enabled']:
+        await prepare_article_images(payload.article_ids)
     with db.connect() as conn:
-        return store_draft(conn, payload)
+        result = store_draft(conn, payload)
+    ai_images.start(result['id'], automatic=True)
+    return result
 
 
 class IssueSelection(BaseModel):
@@ -269,7 +292,9 @@ class IssueSelection(BaseModel):
 
 
 @app.post('/api/issues/open')
-def open_issue(payload: IssueSelection):
+async def open_issue(payload: IssueSelection):
+    if not ai_images.config()['enabled']:
+        await prepare_article_images(payload.article_ids)
     ids = list(dict.fromkeys(payload.article_ids))
     placeholders = ','.join('?' for _ in ids)
     with db.connect() as conn:
@@ -290,6 +315,7 @@ def open_issue(payload: IssueSelection):
             defaults = TemplateSettings.model_validate_json(settings_row['payload']) if settings_row else TemplateSettings()
             project = store_draft(conn, DraftInput(article_ids=ids, outline=defaults.outline, design=defaults.design))
             project_id = project['id']
+            ai_images.start(project_id, automatic=True)
         else:
             project = read_project(project_id)
         for article_id in ids:
@@ -312,6 +338,8 @@ def project(project_id: int):
 
 @app.put('/api/projects/{project_id}')
 def save_project(project_id: int, payload: Project):
+    if ai_images.jobs.get(project_id,{}).get('status') == 'running':
+        raise HTTPException(409,'AI 배경 생성이 진행 중입니다. 완료 후 저장하세요.')
     read_project(project_id)
     check_assets(payload.design)
     with db.connect() as conn:
@@ -339,6 +367,89 @@ def card_png(project_id: int, index: int):
     return Response(content, media_type='image/png', headers={'Cache-Control': 'no-store'})
 
 
+class AIConfigInput(BaseModel):
+    key: str = Field(default='',max_length=300)
+    enabled: bool = False
+
+
+@app.get('/api/ai/settings')
+def ai_settings():
+    configured = ai_images.config()
+    return {'configured':bool(configured['key']), 'enabled':configured['enabled']}
+
+
+@app.put('/api/ai/settings')
+def save_ai_settings(payload: AIConfigInput):
+    try:
+        ai_images.save_config(payload.key.strip(),payload.enabled)
+    except ValueError as exc:
+        raise HTTPException(422,str(exc))
+    return ai_settings()
+
+
+@app.post('/api/projects/{project_id}/ai-backgrounds')
+def generate_backgrounds(project_id: int):
+    read_project(project_id)
+    if not ai_images.start(project_id):
+        raise HTTPException(422,'환경설정에서 OpenAI API 키를 입력하세요.')
+    return {'status':'running'}
+
+
+@app.get('/api/projects/{project_id}/ai-backgrounds')
+def background_status(project_id: int):
+    read_project(project_id)
+    return ai_images.jobs.get(project_id,{'status':'idle','completed':0,'error':None})
+
+
+@app.post('/api/projects/{project_id}/impact-card')
+def replace_impact_card(project_id: int):
+    from .issues import impact_excerpt
+    project = read_project(project_id)
+    ids = [source['article_id'] for source in project['sources']]
+    with db.connect() as conn:
+        rows = [dict(row) for row in conn.execute('SELECT * FROM articles') if row['id'] in ids]
+        body, source_ids = impact_excerpt(rows)
+        project['cards'][2].update(role='impact', heading='영향과 전망', body=body, source_ids=source_ids)
+        project['reviewed'] = False
+        project['warning'] = ('RSS에서 영향·전망 관련 문장을 발췌했습니다. 원문을 검토하세요.' if body else
+                              'RSS에 영향·전망 정보가 없습니다. 원문을 확인하고 세 번째 카드에 내용을 작성하세요.')
+        conn.execute('UPDATE projects SET payload=?,updated_at=? WHERE id=?',
+                     (json.dumps(project,ensure_ascii=False),rss.utcnow(),project_id))
+    return read_project(project_id)
+
+
+@app.post('/api/projects/{project_id}/format-body')
+def format_project_body(project_id: int):
+    from .headlines import format_card_body
+    project = read_project(project_id)
+    for card in project['cards']:
+        if card.get('role') not in ('cover', 'sources', 'custom'):
+            card['body'] = format_card_body(card['body'])
+    project['reviewed'] = False
+    with db.connect() as conn:
+        conn.execute('UPDATE projects SET payload=?,updated_at=? WHERE id=?',
+                     (json.dumps(project, ensure_ascii=False), rss.utcnow(), project_id))
+    return read_project(project_id)
+
+
+@app.post('/api/projects/{project_id}/summarize-cover')
+def summarize_cover(project_id: int):
+    from .headlines import summarize_title
+    project = read_project(project_id)
+    title = project['sources'][0]['title'] if project['sources'] else project['title']
+    covers = [card for card in project['cards'] if card.get('role') == 'cover']
+    if not covers:
+        raise HTTPException(422, '표지 역할의 카드가 없습니다. 카드 구성을 확인하세요.')
+    for card in covers:
+        card['body'] = summarize_title(title)
+    project['reviewed'] = False
+    now = rss.utcnow()
+    with db.connect() as conn:
+        conn.execute('UPDATE projects SET payload=?,updated_at=? WHERE id=?',
+                     (json.dumps(project, ensure_ascii=False), now, project_id))
+    return read_project(project_id)
+
+
 @app.get('/api/projects/{project_id}/export.zip')
 def export(project_id: int):
     project = read_project(project_id)
@@ -358,7 +469,7 @@ def export(project_id: int):
 
 
 def check_assets(design):
-    for asset_id in set(design.image_ids + ([design.logo_id] if design.logo_id else [])):
+    for asset_id in set(design.image_ids + ([design.logo_id] if design.logo_id else []) + ([design.badge_id] if design.badge_id else [])):
         try:
             assets.metadata(asset_id)
         except ValueError as exc:
@@ -439,7 +550,7 @@ def delete_asset(asset_id: str):
         documents += [json.loads(row['payload']) for row in conn.execute('SELECT payload FROM settings')]
         for document in documents:
             design = document.get('design', {})
-            if asset_id in design.get('image_ids', []) or asset_id == design.get('logo_id') or any(card.get('image_id') == asset_id for card in document.get('cards', [])):
+            if asset_id in design.get('image_ids', []) or asset_id == design.get('logo_id') or asset_id == design.get('badge_id') or any(card.get('image_id') == asset_id for card in document.get('cards', [])):
                 raise HTTPException(409, '사용 중인 자산입니다. 기본 설정과 제작물에서 해당 이미지·로고를 해제한 뒤 삭제하세요.')
         try:
             assets.image_path(asset_id).unlink()

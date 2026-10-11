@@ -104,8 +104,25 @@ def parse_feed(content, base_url):
             url = canonical_url(urljoin(base_url, link))
         except ValueError:
             continue
+        image_url = ''
+        for child in item.iter():
+            if local(child.tag) in ('thumbnail', 'content', 'enclosure'):
+                candidate = child.get('url') or child.get('href')
+                kind = child.get('type', '')
+                if candidate and (local(child.tag) == 'thumbnail' or kind.startswith('image/') or child.get('medium') == 'image'):
+                    image_url = urljoin(base_url, candidate)
+                    break
+        if not image_url:
+            raw = values.get('description') or values.get('encoded') or values.get('content') or values.get('summary') or ''
+            match = re.search(r'<img\b[^>]*\bsrc=[\"\']([^\"\']+)', raw, re.I)
+            if match:
+                image_url = urljoin(base_url, match.group(1))
+        try:
+            image_url = canonical_url(image_url) if image_url else ''
+        except ValueError:
+            image_url = ''
         results.append({
-            'title': title, 'url': url,
+            'title': title, 'url': url, 'image_url': image_url,
             'summary': clean(values.get('description') or values.get('summary') or values.get('encoded') or values.get('content'))[:10000],
             'published_at': date_value(values.get('pubDate') or values.get('published') or values.get('updated') or values.get('date')),
         })
@@ -133,3 +150,21 @@ async def fetch_feed(url):
                         raise ValueError('RSS 크기가 2MB 제한을 초과했습니다.')
                 return parse_feed(bytes(chunks), url)
         raise ValueError('RSS 리디렉션이 너무 많습니다.')
+
+
+async def fetch_image(url):
+    async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
+        for _ in range(5):
+            url = await validate_public_url(url)
+            async with client.stream('GET', url) as response:
+                if response.is_redirect:
+                    url = urljoin(url, response.headers.get('location', ''))
+                    continue
+                response.raise_for_status()
+                data = bytearray()
+                async for chunk in response.aiter_bytes():
+                    data.extend(chunk)
+                    if len(data) > 8 * 1024 * 1024:
+                        raise ValueError('기사 이미지가 8MB 제한을 초과했습니다.')
+                return bytes(data)
+    raise ValueError('기사 이미지 리디렉션이 너무 많습니다.')

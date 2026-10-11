@@ -52,7 +52,7 @@ async function showView(view) {
     if (view === 'issues') await loadIssues();
     if (view === 'feeds') await loadFeeds();
     if (view === 'projects') await loadProjects();
-    if (view === 'settings') await loadSettings();
+    if (view === 'settings') {await loadSettings(); const ai=await api('/api/ai/settings');$('#ai-enabled').checked=ai.enabled;$('#ai-config-status').textContent=ai.configured?'API 키 등록됨':'API 키 미등록';}
     if (view === 'assets') await loadAssets();
   } catch (error) { toast(error.message, true); }
 }
@@ -114,6 +114,7 @@ async function openEditor(project) {
   $('#editor-count').textContent = project.cards.length;
   await loadAssetNames(project.design);
   renderDesigner('editor', project.design);
+  monitorBackgrounds(project.id);
   $('#source-links').innerHTML = '<p class="muted">원문 확인</p>' + project.sources.map(source => `<a href="${escapeHTML(source.url)}" target="_blank" rel="noopener noreferrer">↗ ${escapeHTML(source.publisher)} · ${escapeHTML(source.title)}</a>`).join('');
   showCard();
 }
@@ -123,7 +124,9 @@ function applyCard() {
   card.heading = $('#card-heading').value;
   card.body = $('#card-body').value;
   card.layout = $('#card-layout').value || null;
-  card.image_id = $('#card-image').value || null;
+  const imageId=$('#card-image').value || null;
+  if(card.image_id!==imageId) card.ai_background=false;
+  card.image_id=imageId;
   card.source_ids = [...document.querySelectorAll('[data-source]:checked')].map(input => Number(input.dataset.source));
 }
 function markDirty(unreview = true) {
@@ -188,6 +191,53 @@ $('#collect').onclick = () => busy($('#collect'), async () => {
 });
 ['#card-heading','#card-body','#project-title','#caption','#accent','#card-layout','#card-image'].forEach(selector => $(selector).oninput = () => markDirty());
 $('#reviewed').onchange = () => markDirty(false);
+$('#ai-save').onclick=()=>busy($('#ai-save'),async()=>{
+  const result=await api('/api/ai/settings',{method:'PUT',body:JSON.stringify({key:$('#ai-key').value,enabled:$('#ai-enabled').checked})});
+  $('#ai-key').value='';$('#ai-config-status').textContent=result.configured?'API 키 등록됨':'API 키 미등록';toast('AI 이미지 설정을 저장했습니다.');
+});
+let backgroundTimer;
+async function monitorBackgrounds(id) {
+  clearTimeout(backgroundTimer);
+  if(state.project?.id!==id || state.view!=='editor') return;
+  try {
+    const job=await api(`/api/projects/${id}/ai-backgrounds`);
+    $('#ai-progress').textContent=job.status==='running'?`AI 배경 생성 중 · ${job.completed}장 완료`:(job.error||'');
+    if(job.status==='running') backgroundTimer=setTimeout(()=>monitorBackgrounds(id),3000);
+    else if(job.status==='done') {
+      const latest=await api(`/api/projects/${id}`);
+      applyCard();
+      state.project.design.image_ids=[...new Set([...state.project.design.image_ids,...latest.design.image_ids])];
+      state.project.cards.forEach((card,index)=>{card.image_id=latest.cards[index].image_id;card.ai_background=latest.cards[index].ai_background;});
+      await loadAssetNames(state.project.design);renderDesigner('editor',state.project.design);
+      $('#reviewed').checked=false;$('#card-image').innerHTML='<option value="">이미지 없음</option>'+state.project.design.image_ids.map(asset=>`<option value="${asset}">${escapeHTML(state.assets[asset]?.name||'배경')}</option>`).join('');
+      $('#card-image').value=state.project.cards[state.card].image_id||'';refreshPreview();
+      $('#ai-progress').textContent=`AI 배경 ${job.completed}장 생성 완료`;
+    }
+  } catch(error) {$('#ai-progress').textContent=error.message;}
+}
+$('#ai-backgrounds').onclick=()=>busy($('#ai-backgrounds'),async()=>{
+  await saveProject();await api(`/api/projects/${state.project.id}/ai-backgrounds`,{method:'POST'});monitorBackgrounds(state.project.id);
+});
+$('#impact-card').onclick=()=>busy($('#impact-card'),async()=>{
+  await saveProject();
+  const project=await api(`/api/projects/${state.project.id}/impact-card`,{method:'POST'});
+  await openEditor(project);state.card=2;showCard();
+  toast(project.cards[2].body?'세 번째 카드에 영향과 전망 문장을 적용했습니다.':'RSS에 전망 정보가 없어 문구를 비워 두었습니다. 원문을 확인해 작성하세요.');
+});
+$('#format-body').onclick=()=>busy($('#format-body'),async()=>{
+  await saveProject();
+  const project=await api(`/api/projects/${state.project.id}/format-body`,{method:'POST'});
+  const selected=state.card;
+  await openEditor(project);
+  state.card=selected;showCard();
+  toast('본문 카드의 기자명과 문단을 정리했습니다.');
+});
+$('#summarize-cover').onclick=()=>busy($('#summarize-cover'),async()=>{
+  await saveProject();
+  const project=await api(`/api/projects/${state.project.id}/summarize-cover`,{method:'POST'});
+  await openEditor(project);
+  toast('RSS 제목에서 짧은 표지 문구를 만들었습니다. 원래 제목은 출처와 캡션에 유지됩니다.');
+});
 $('#save').onclick = () => busy($('#save'), async () => {await saveProject(); toast('카드뉴스를 저장했습니다.');});
 $('#export').onclick = () => busy($('#export'), async () => {
   await saveProject();
@@ -232,7 +282,7 @@ function renderOutline(context='plan') {
 function designChanged(context) {if (context==='editor') markDirty(); if(context==='settings') settingsDirty();}
 function renderDesigner(context,design) {
   const root=$(`#${context}-design`);
-  root.innerHTML = `<h3>기본 레이아웃</h3><div class="layout-picker">${Object.entries(layouts).map(([key,label]) => `<button type="button" data-layout="${key}" class="layout-choice ${design.layout===key?'selected':''}" aria-pressed="${design.layout===key}"><span class="layout-wireframe ${key}"><i></i><b></b><em></em></span>${label}</button>`).join('')}</div><div class="design-fields"><label>강조색<input type="color" data-accent value="${design.accent}"></label><label>배경색<input type="color" data-background value="${design.background || (design.layout==='editorial'?'#f6f4eb':'#111820')}"></label><label>문자색<input type="color" data-text-color value="${design.text_color || (design.layout==='editorial'?'#182922':'#f1f4f6')}"></label><label class="grow">디자인 방향<textarea data-notes rows="2" maxlength="2000" placeholder="예: 넓은 여백, 간결한 문구, 참고 이미지의 색감">${escapeHTML(design.notes)}</textarea></label></div><label class="logo-selector">공통 로고<select data-logo><option value="">로고 없음 · MEDIALOG 표시</option>${state.library.map(asset=>`<option value="${asset.id}" ${asset.id===design.logo_id?'selected':''}>${escapeHTML(asset.name)}</option>`).join('')}</select></label><div class="reference-heading"><h3>참고 링크</h3><button type="button" class="text-button" data-add-reference>+ 링크 추가</button></div><div class="reference-list">${design.references.map((ref,index) => `<div class="reference-row"><input type="url" data-ref-url="${index}" value="${escapeHTML(ref.url)}" placeholder="https://…" aria-label="참고 링크 ${index+1}" maxlength="2000"><input data-ref-note="${index}" value="${escapeHTML(ref.note)}" placeholder="참고할 요소 (색감, 구성 등)" aria-label="참고 설명 ${index+1}" maxlength="300"><button type="button" class="text-button" data-remove-ref="${index}" aria-label="참고 링크 ${index+1} 삭제">✕</button></div>`).join('')}</div><div class="reference-heading"><h3>참고 이미지</h3><button type="button" class="text-button" data-open-library>보관함에서 선택</button><label class="upload-button">+ 이미지 첨부<input type="file" data-upload accept=".jpg,.jpeg,.jfif,.png,.webp,image/jpeg,image/png,image/webp" multiple></label></div><p class="muted">PNG · JPEG · WebP / 파일당 8MB · 2천만 화소 이하 / 최대 10개. 첨부 이미지는 참고용으로 보관되며, 이미지 레이아웃에서 카드에 사용할 이미지를 선택할 수 있습니다. ‘디자인에 적용’을 누르면 이미지의 대표 색상과 명암을 추출해 중앙 포스터 구성에 적용합니다. 글자·사진·정확한 서체를 복제하지는 않습니다.</p><div data-library-picker class="library-picker ${state.libraryOpen.has(context)?'':'hidden'}">${state.library.length?state.library.map(asset=>`<button type="button" class="asset-choice ${design.image_ids.includes(asset.id)?'selected':''}" data-pick-asset="${asset.id}" aria-pressed="${design.image_ids.includes(asset.id)}"><img src="/api/assets/${asset.id}.png" alt="${escapeHTML(asset.name)}"><span>${escapeHTML(asset.name)}</span></button>`).join(''):'자산 보관함에 이미지를 먼저 업로드하세요.'}</div><div class="attachment-grid">${design.image_ids.map(id => `<div class="attachment"><a href="/api/assets/${id}.png" target="_blank" rel="noopener"><img src="/api/assets/${id}.png" alt="${escapeHTML(state.assets[id]?.name || '참고 이미지')}"></a><span>${escapeHTML(state.assets[id]?.name || '참고 이미지')}</span><button type="button" class="text-button" data-apply-reference="${id}">디자인에 적용</button><button type="button" class="text-button" data-detach="${id}" aria-label="${escapeHTML(state.assets[id]?.name || '이미지')} 첨부 해제">✕</button></div>`).join('')}</div>`;
+  root.innerHTML = `<h3>기본 레이아웃</h3><div class="layout-picker">${Object.entries(layouts).map(([key,label]) => `<button type="button" data-layout="${key}" class="layout-choice ${design.layout===key?'selected':''}" aria-pressed="${design.layout===key}"><span class="layout-wireframe ${key}"><i></i><b></b><em></em></span>${label}</button>`).join('')}</div><div class="design-fields"><label>강조색<input type="color" data-accent value="${design.accent}"></label><label>배경색<input type="color" data-background value="${design.background || (design.layout==='editorial'?'#f6f4eb':'#111820')}"></label><label>문자색<input type="color" data-text-color value="${design.text_color || (design.layout==='editorial'?'#182922':'#f1f4f6')}"></label><label class="grow">디자인 방향<textarea data-notes rows="2" maxlength="2000" placeholder="예: 넓은 여백, 간결한 문구, 참고 이미지의 색감">${escapeHTML(design.notes)}</textarea></label></div><label class="logo-selector">공통 로고<select data-logo><option value="">로고 없음 · MEDIALOG 표시</option>${state.library.map(asset=>`<option value="${asset.id}" ${asset.id===design.logo_id?'selected':''}>${escapeHTML(asset.name)}</option>`).join('')}</select></label><label class="logo-selector">표지 뉴스속보 배너<select data-badge><option value="">기본 뉴스속보 표시</option>${state.library.map(asset=>`<option value="${asset.id}" ${asset.id===design.badge_id?'selected':''}>${escapeHTML(asset.name)}</option>`).join('')}</select></label><div class="reference-heading"><h3>참고 링크</h3><button type="button" class="text-button" data-add-reference>+ 링크 추가</button></div><div class="reference-list">${design.references.map((ref,index) => `<div class="reference-row"><input type="url" data-ref-url="${index}" value="${escapeHTML(ref.url)}" placeholder="https://…" aria-label="참고 링크 ${index+1}" maxlength="2000"><input data-ref-note="${index}" value="${escapeHTML(ref.note)}" placeholder="참고할 요소 (색감, 구성 등)" aria-label="참고 설명 ${index+1}" maxlength="300"><button type="button" class="text-button" data-remove-ref="${index}" aria-label="참고 링크 ${index+1} 삭제">✕</button></div>`).join('')}</div><div class="reference-heading"><h3>참고 이미지</h3><button type="button" class="text-button" data-open-library>보관함에서 선택</button><label class="upload-button">+ 이미지 첨부<input type="file" data-upload accept=".jpg,.jpeg,.jfif,.png,.webp,image/jpeg,image/png,image/webp" multiple></label></div><p class="muted">PNG · JPEG · WebP / 파일당 8MB · 2천만 화소 이하 / 최대 10개. 첨부 이미지는 참고용으로 보관되며, 이미지 레이아웃에서 카드에 사용할 이미지를 선택할 수 있습니다. ‘디자인에 적용’을 누르면 이미지의 대표 색상과 명암을 추출해 중앙 포스터 구성에 적용합니다. 글자·사진·정확한 서체를 복제하지는 않습니다.</p><div data-library-picker class="library-picker ${state.libraryOpen.has(context)?'':'hidden'}">${state.library.length?state.library.map(asset=>`<button type="button" class="asset-choice ${design.image_ids.includes(asset.id)?'selected':''}" data-pick-asset="${asset.id}" aria-pressed="${design.image_ids.includes(asset.id)}"><img src="/api/assets/${asset.id}.png" alt="${escapeHTML(asset.name)}"><span>${escapeHTML(asset.name)}</span></button>`).join(''):'자산 보관함에 이미지를 먼저 업로드하세요.'}</div><div class="attachment-grid">${design.image_ids.map(id => `<div class="attachment"><a href="/api/assets/${id}.png" target="_blank" rel="noopener"><img src="/api/assets/${id}.png" alt="${escapeHTML(state.assets[id]?.name || '참고 이미지')}"></a><span>${escapeHTML(state.assets[id]?.name || '참고 이미지')}</span><button type="button" class="text-button" data-apply-reference="${id}">디자인에 적용</button><button type="button" class="text-button" data-detach="${id}" aria-label="${escapeHTML(state.assets[id]?.name || '이미지')} 첨부 해제">✕</button></div>`).join('')}</div>`;
   root.querySelectorAll('[data-layout]').forEach(button => button.onclick = () => {design.layout=button.dataset.layout; designChanged(context); renderDesigner(context,design);});
   root.querySelector('[data-background]').oninput=event=>{design.background=event.target.value;designChanged(context);};
   root.querySelector('[data-text-color]').oninput=event=>{design.text_color=event.target.value;designChanged(context);};
@@ -254,6 +304,7 @@ function renderDesigner(context,design) {
       }
     } catch(error) {toast(error.message,true);button.disabled=false;}
   });
+  root.querySelector('[data-badge]').onchange=event=>{design.badge_id=event.target.value||null;designChanged(context);};
   root.querySelector('[data-logo]').onchange=event=>{design.logo_id=event.target.value||null; designChanged(context);};
   root.querySelector('[data-open-library]').onclick=()=>{if(state.libraryOpen.has(context)) state.libraryOpen.delete(context); else state.libraryOpen.add(context); root.querySelector('[data-library-picker]').classList.toggle('hidden',!state.libraryOpen.has(context));};
   root.querySelectorAll('[data-pick-asset]').forEach(button=>button.onclick=()=>{
